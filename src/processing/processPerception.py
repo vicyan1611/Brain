@@ -35,6 +35,8 @@ class FrameReader(ThreadWithStop):
             data = base64.b64decode(msg)
             arr = np.frombuffer(data, dtype=np.uint8)
             frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if frame is None:
+                return
             try:
                 self.q.put_nowait(frame)
             except Full:
@@ -68,38 +70,128 @@ class ObstacleWorker(BasePerceptionWorker):
         self.warn_sender = messageHandlerSender(queuesList, WarningSignal)
         self._last_stop_time = 0
 
+        self._obs_count = 0
+        self._require_consecutive = 3   # tune: 2-6 tùy độ rung/nhiễu
+
+    def detect_obstacle(
+        self,
+        frame,
+        roi_y_start=0.55,          # nhìn phần dưới ảnh (55% -> 100%)
+        roi_x_left=0.2,            # nhìn giữa ảnh
+        roi_x_right=0.8,
+        blur_ksize=5,              # giảm nhiễu
+        canny1=60,                 # Canny thresholds (tune)
+        canny2=160,
+        edge_ratio_threshold=0.06, # % pixel là biên đủ lớn -> obstacle
+        min_contour_area=800       # lọc rác nhỏ (tune theo độ phân giải)
+    ):
+        """
+        Returns: (is_obstacle: bool, score: float, debug: dict)
+        score = max(edge_ratio, contour_area_ratio)
+        """
+        if frame is None or frame.size == 0:
+            return False, 0.0, {}
+
+        h, w = frame.shape[:2]
+        y0 = int(h * roi_y_start)
+        x1 = int(w * roi_x_left)
+        x2 = int(w * roi_x_right)
+        roi = frame[y0:h, x1:x2]
+        if roi.size == 0:
+            return False, 0.0, {}
+
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (blur_ksize, blur_ksize), 0)
+
+        edges = cv2.Canny(gray, canny1, canny2)
+        edge_ratio = float((edges > 0).mean())
+
+        # Contour check: obstacle thường tạo mảng biên lớn
+        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        roi_area = float(roi.shape[0] * roi.shape[1])
+
+        max_area = 0.0
+        for c in contours:
+            a = cv2.contourArea(c)
+            if a > max_area:
+                max_area = a
+
+        contour_area_ratio = float(max_area / roi_area) if roi_area > 0 else 0.0
+
+        # Điều kiện obstacle: hoặc edge_ratio đủ lớn, hoặc có contour đủ lớn
+        is_obstacle = (edge_ratio >= edge_ratio_threshold) or (max_area >= min_contour_area)
+
+        score = max(edge_ratio, contour_area_ratio)
+        debug = {
+            "edge_ratio": edge_ratio,
+            "max_contour_area": max_area,
+            "contour_area_ratio": contour_area_ratio,
+            "roi_shape": roi.shape,
+        }
+        return is_obstacle, score, debug
+    
     def thread_work(self):
         try:
             frame = self.q.get(timeout=0.5)
         except Empty:
             return
 
-        try:
-            h, w = frame.shape[:2]
-            cx1 = int(w * 0.3)
-            cy1 = int(h * 0.3)
-            cx2 = int(w * 0.7)
-            cy2 = int(h * 0.7)
-            crop = frame[cy1:cy2, cx1:cx2]
-            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-            edges = cv2.Canny(gray, 50, 150)
-            edge_density = float(edges.mean() / 255.0)
-            if self.logger:
-                self.logger.info("Perception obstacle edge_density=%.4f", edge_density)
+        # Guard an toàn
+        if frame is None or getattr(frame, "size", 0) == 0:
+            return
 
-            # threshold and simple rate-limit
-            if edge_density > 0.06:
+        try:
+            # === GỌI HÀM detect_obstacle MỚI (CÓ self) ===
+            is_obstacle, score, debug = self.detect_obstacle(
+                frame,
+                roi_y_start=0.25,          # nhìn phía trước xe (phần dưới ảnh)
+                roi_x_left=0.2,
+                roi_x_right=0.8,
+                blur_ksize=5,
+                canny1=60,
+                canny2=160,
+                edge_ratio_threshold=0.06,
+                min_contour_area=800
+            )
+
+            if self.logger:
+                self.logger.info(
+                    "Obstacle detect | is=%s | score=%.4f | edge=%.4f | area=%.1f",
+                    is_obstacle,
+                    score,
+                    float(debug.get("edge_ratio", 0.0)),
+                    float(debug.get("max_contour_area", 0.0)),
+                )
+
+            # === DEBOUNCE: phải gặp liên tiếp N frame ===
+            if is_obstacle:
+                self._obs_count += 1
+            else:
+                self._obs_count = 0
+
+            if self._obs_count >= self._require_consecutive:
                 now = time.time()
+
+                # === RATE LIMIT: tránh spam stop ===
                 if now - self._last_stop_time > 1.0:
                     self._last_stop_time = now
+
+                    # === STOP XE ===
                     try:
                         self.speed_sender.send("0")
                     except Exception:
                         pass
+
+                    # === CẢNH BÁO ===
                     try:
-                        self.warn_sender.send(f"obstacle:{edge_density:.4f}")
+                        self.warn_sender.send(
+                            f"obstacle score={score:.4f} "
+                            f"edge={debug.get('edge_ratio', 0.0):.4f} "
+                            f"area={debug.get('max_contour_area', 0.0):.1f}"
+                        )
                     except Exception:
                         pass
+
         except Exception as e:
             if self.logger:
                 self.logger.debug("ObstacleWorker error: %s", e)
@@ -167,7 +259,7 @@ class processPerception(WorkerProcess):
 
         # Worker threads (easy to extend)
         self.threads.append(ObstacleWorker(self._frame_queue, self.queuesList, self.logging))
-        self.threads.append(LaneWorker(self._frame_queue, self.queuesList, self.logging))
+        # self.threads.append(LaneWorker(self._frame_queue, self.queuesList, self.logging)) # Chưa xài nên cmt
 
         # Add more workers here as needed
 

@@ -39,6 +39,7 @@ from src.utils.messages.allMessages import (
     Record,
     Brightness,
     Contrast,
+    # ObstacleDetected,
 )
 from src.utils.messages.messageHandlerSender import messageHandlerSender
 from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
@@ -69,6 +70,11 @@ class threadCamera(ThreadWithStop):
         self.recordingSender = messageHandlerSender(self.queuesList, Recording)
         self.mainCameraSender = messageHandlerSender(self.queuesList, mainCamera)
         self.serialCameraSender = messageHandlerSender(self.queuesList, serialCamera)
+        
+        # self.obstacleSender = messageHandlerSender(self.queuesList, ObstacleDetected)
+        # self.obstacle_active = False
+        # self.obstacle_intensity_threshold = 80
+        # self.obstacle_ratio_threshold = 0.12
 
         self.subscribe()
         self._init_camera()
@@ -128,6 +134,11 @@ class threadCamera(ThreadWithStop):
                 self.video_writer.write(mainRequest) # type: ignore
 
             serialRequest = cv2.cvtColor(serialRequest, cv2.COLOR_YUV2BGR_I420) # type: ignore
+
+            # obstacle_detected = self._detect_obstacle(serialRequest)
+            # if obstacle_detected != self.obstacle_active:
+            #     self.obstacleSender.send(obstacle_detected)
+            #     self.obstacle_active = obstacle_detected
 
             _, mainEncodedImg = cv2.imencode(".jpg", mainRequest) # type: ignore
             _, serialEncodedImg = cv2.imencode(".jpg", serialRequest) # type: ignore
@@ -214,3 +225,23 @@ class threadCamera(ThreadWithStop):
                 }
             )
         threading.Timer(1, self.configs).start()
+
+    # def _detect_obstacle(self, frame):
+    #     """Rudimentary obstacle check using low-resolution frame."""
+    #     if frame is None or frame.size == 0:
+    #         return False
+
+    #     height, width = frame.shape[:2]
+    #     top = int(height * 0.45)
+    #     left = int(width * 0.25)
+    #     right = int(width * 0.75)
+    #     roi = frame[top:height, left:right]
+
+    #     if roi.size == 0:
+    #         return False
+
+    #     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    #     _, mask = cv2.threshold(gray, self.obstacle_intensity_threshold, 255, cv2.THRESH_BINARY_INV)
+    #     filled_ratio = float((mask > 0).mean())
+
+    #     return filled_ratio >= self.obstacle_ratio_threshold

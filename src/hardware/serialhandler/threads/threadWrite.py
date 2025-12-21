@@ -46,7 +46,8 @@ from src.utils.messages.allMessages import (
     SerialConnectionState,
     ControlCalib,
     IsAlive,
-    RequestSteerLimits
+    RequestSteerLimits,
+    # ObstacleDetected,
 )
 from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
 from src.utils.messages.messageHandlerSender import messageHandlerSender
@@ -78,6 +79,8 @@ class threadWrite(ThreadWithStop):
         self.steerMotorSender = messageHandlerSender(self.queuesList, SteerMotor)
         self.speedMotorSender = messageHandlerSender(self.queuesList, SpeedMotor)
         self.configPath = "src/utils/table_state.json"
+        # self.obstacle_blocked = False
+        # self.last_obstacle_command = 0.0
 
         # error rate limiting
         self.last_error_time = None
@@ -107,6 +110,7 @@ class threadWrite(ThreadWithStop):
         self.controlCalibSubscriber = messageHandlerSubscriber(self.queuesList, ControlCalib, "lastOnly", True)
         self.isAliveSubscriber = messageHandlerSubscriber(self.queuesList, IsAlive, "lastOnly", True)
         self.requestSteerLimitsSubscriber = messageHandlerSubscriber(self.queuesList, RequestSteerLimits, "lastOnly", True)
+        self.obstacleSubscriber = messageHandlerSubscriber(self.queuesList, ObstacleDetected, "lastOnly", True)
         
     def _init_senders(self):
         self.serialConnectionStateSender = messageHandlerSender(self.queuesList, SerialConnectionState)
@@ -198,6 +202,15 @@ class threadWrite(ThreadWithStop):
                 command = {"action": "steerLimits", "request": 0}
                 self.send_to_serial(command)
 
+            # obstacleRecv = self.obstacleSubscriber.receive()
+            # if obstacleRecv is not None:
+            #     self.obstacle_blocked = bool(obstacleRecv)
+            #     if self.obstacle_blocked:
+            #         self._apply_obstacle_stop(force=True)
+
+            # if self.obstacle_blocked:
+            #     self._apply_obstacle_stop()
+
             if self.running:
                 if self.engineEnabled:
                     brakeRecv = self.brakeSubscriber.receive()
@@ -211,7 +224,13 @@ class threadWrite(ThreadWithStop):
                     if speedRecv is not None: 
                         if self.debugger:
                             self.logger.info(speedRecv)
-                        command = {"action": "speed", "speed": int(speedRecv)}
+                        try:
+                            speed_value = int(speedRecv)
+                        except (TypeError, ValueError):
+                            speed_value = 0
+                        if self.obstacle_blocked:
+                            speed_value = 0
+                        command = {"action": "speed", "speed": speed_value}
                         self.send_to_serial(command)
 
                     steerRecv = self.steerMotorSubscriber.receive()
@@ -225,10 +244,16 @@ class threadWrite(ThreadWithStop):
                     if controlRecv is not None:
                         if self.debugger:
                             self.logger.info(controlRecv) 
+                        try:
+                            target_speed = int(controlRecv["Speed"])
+                        except (KeyError, TypeError, ValueError):
+                            target_speed = 0
+                        if self.obstacle_blocked:
+                            target_speed = 0
                         command = {
                             "action": "vcd",
                             "time": int(controlRecv["Time"]),
-                            "speed": int(controlRecv["Speed"]),
+                            # "speed": target_speed,
                             "steer": int(controlRecv["Steer"]),
                         }
                         self.send_to_serial(command)
@@ -237,10 +262,16 @@ class threadWrite(ThreadWithStop):
                     if controlCalibRecv is not None:
                         if self.debugger:
                             self.logger.info(controlCalibRecv) 
+                        # try:
+                        #     calib_speed = int(controlCalibRecv["Speed"])
+                        # except (KeyError, TypeError, ValueError):
+                        #     calib_speed = 0
+                        # if self.obstacle_blocked:
+                        #     calib_speed = 0
                         command = {
                             "action": "vcdCalib",
                             "time": int(controlCalibRecv["Time"]),
-                            "speed": int(controlCalibRecv["Speed"]),
+                            # "speed": calib_speed,
                             "steer": int(controlCalibRecv["Steer"]),
                         }
                         self.send_to_serial(command)
@@ -314,3 +345,13 @@ class threadWrite(ThreadWithStop):
             self.last_error_time = now
             return True
         return False
+
+    # def _apply_obstacle_stop(self, force=False):
+    #     """Force a stop command while an obstacle blocks the path."""
+    #     now = time.time()
+    #     if not force and (now - self.last_obstacle_command) < 0.2:
+    #         return
+
+    #     stop_command = {"action": "speed", "speed": 0}
+    #     self.send_to_serial(stop_command)
+    #     self.last_obstacle_command = now

@@ -59,6 +59,12 @@ class LaneKeeping(Enum):
     msgID = 5
     msgType = "int"
 
+# class ObstacleDetected(Enum):
+#     Queue = "General"
+#     Owner = "threadCamera"
+#     msgID = 6
+#     msgType = "bool"
+
 ################################# processCarsAndSemaphores ##################################
 class Cars(Enum):
     Queue = "General"
