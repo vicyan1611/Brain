@@ -9,3 +9,6 @@ cryptography>=43,<45
 opencv-python          # if wheel fails, use: sudo apt-get install -y python3-opencv
 pyserial==3.5
 scipy>=1.15,<2
+torch
+ultralytics
+numpy>=1.24,<2        # required by torch/ultralytics and scipy
