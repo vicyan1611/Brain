@@ -37,6 +37,7 @@ import inspect
 import eventlet
 import os
 import time
+import datetime
 
 from flask import Flask, request
 from flask_socketio import SocketIO
@@ -104,6 +105,7 @@ class processDashboard(WorkerProcess):
 
         # configuration
         self.table_state_file = self._get_table_state_path()
+        
 
         # setup flask and socketio
         self.app = Flask(__name__)
@@ -152,6 +154,7 @@ class processDashboard(WorkerProcess):
         eventlet.spawn(self.send_hardware_data_to_frontend)
         eventlet.spawn(self.send_heartbeat)
         eventlet.spawn(self.stream_console_logs)
+        eventlet.spawn(self.stream_motor_telemetry)
 
     def stream_console_logs(self):
         """Monitor the Log queue and emit messages to frontend."""
@@ -414,3 +417,31 @@ class processDashboard(WorkerProcess):
         except Exception as e:
             self.logger.error(f"Failed to read brain-monitor.log: {e}")
             self.socketio.emit('brain_monitor_logs', {'error': f'Failed to read log file: {str(e)}'})
+    def stream_motor_telemetry(self):
+        while self.running:
+            try:
+                speed_sub = self.messages.get("SpeedMotor", {}).get("obj")
+                steer_sub = self.messages.get("SteerMotor", {}).get("obj")
+                
+                if speed_sub and steer_sub:
+                    speed_val = speed_sub.receive()
+                    steer_val = steer_sub.receive()
+                    
+                    if speed_val is not None or steer_val is not None:
+                        speed = float(speed_val) if speed_val is not None else 0.0
+                        steer = float(steer_val) if steer_val is not None else 0.0
+                        
+                        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        log_message = f"[{timestamp}] [ Motor ] Speed: {speed:.2f} | Servo: {steer:.2f}°\n"
+                        try:
+                            with open('/var/log/brain-monitor.log', 'a') as f:
+                                f.write(log_message)
+                        except PermissionError:
+                            print(log_message.strip())
+                
+                eventlet.sleep(0.5)
+                
+            except Exception as e:
+                if self.debugging:
+                    self.logger.error(f"Error streaming motor telemetry: {e}")
+                eventlet.sleep(1)
