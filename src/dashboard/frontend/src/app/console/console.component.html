@@ -1,7 +1,16 @@
 <div *ngIf="open" class="console-overlay" (click)="handleClose()">
     <div class="console-window" (click)="$event.stopPropagation()">
         <div class="console-header">
-            <h3>Terminal Output</h3>
+            <div class="log-type-switcher">
+                <button [class.active]="currentLogType === 'console'" (click)="switchLogType('console')"
+                    class="switch-btn">
+                    Console Log
+                </button>
+                <button [class.active]="currentLogType === 'brainMonitor'" (click)="switchLogType('brainMonitor')"
+                    class="switch-btn">
+                    Brain Monitor
+                </button>
+            </div>
             <div class="header-actions">
                 <button (click)="clearConsole()" class="icon-btn" title="Clear Console">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"
@@ -20,7 +29,11 @@
             </div>
         </div>
         <div class="console-body" #scrollContainer>
-            <div *ngFor="let log of logs" class="log-line" [innerHTML]="log">
+            <div *ngIf="currentLogType === 'console'">
+                <div *ngFor="let log of logs" class="log-line" [innerHTML]="log"></div>
+            </div>
+            <div *ngIf="currentLogType === 'brainMonitor'">
+                <div *ngFor="let log of brainMonitorLogs" class="log-line" [innerHTML]="log"></div>
             </div>
         </div>
     </div>

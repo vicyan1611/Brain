@@ -111,3 +111,30 @@
 .console-body::-webkit-scrollbar-thumb:hover {
     background: #555;
 }
+
+.log-type-switcher {
+    display: flex;
+    gap: 8px;
+    margin: 0 auto;
+}
+
+.switch-btn {
+    padding: 6px 16px;
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 4px;
+    color: #fff;
+    cursor: pointer;
+    transition: all 0.2s;
+    font-size: 14px;
+}
+
+.switch-btn:hover {
+    background: rgba(255, 255, 255, 0.15);
+}
+
+.switch-btn.active {
+    background: #00ff88;
+    color: #000;
+    border-color: #00ff88;
+}

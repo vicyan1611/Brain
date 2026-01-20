@@ -403,9 +403,9 @@ class processDashboard(WorkerProcess):
         try: 
             logFilePath = '/var/log/brain-monitor.log'
             with open(logFilePath, 'r') as logFile:
-                logContents = logFile.read()
+                logLines = logFile.readlines()
             
-            log_to_send = logContents[-500:] if len(logContents) > 500 else logContents
+            log_to_send = logLines[-100:] if len(logLines) > 100 else logLines
             self.socketio.emit('brain_monitor_logs', {'data': log_to_send})
         except FileNotFoundError:
             self.socketio.emit('brain_monitor_logs', {'error': 'Log file not found'})
