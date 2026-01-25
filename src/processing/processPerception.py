@@ -10,7 +10,8 @@ from src.utils.messages.allMessages import (
     SteerMotor,
     WarningSignal,
     LaneKeeping,
-    Brake
+    Brake,
+    DistanceReading,
 )
 
 import base64
@@ -25,15 +26,39 @@ import ultralytics
 class FrameReader(ThreadWithStop):
     """Reads frames from `serialCamera` messages and pushes decoded frames into a local queue."""
 
-    def __init__(self, queuesList, frame_queue, logger=None, pause=0.01):
+    def __init__(self, queuesList, frame_queue, logger=None, pause=0.01, distance_threshold_cm=150.0, log_interval_sec=1.0):
         super(FrameReader, self).__init__(pause=pause)
         self.sub = messageHandlerSubscriber(queuesList, serialCamera, "lastOnly", True)
+        self.distance_sub = messageHandlerSubscriber(queuesList, DistanceReading, "lastOnly", True)
         self.q = frame_queue
         self.logger = logger
+        self.distance_threshold_cm = distance_threshold_cm
+        self.log_interval_sec = log_interval_sec
+        self._last_distance_cm = None
+        self._last_log_ts = 0.0
 
     def thread_work(self):
+        # Update latest distance if a reading is available
+        latest_distance = self.distance_sub.receive()
+        if latest_distance is not None:
+            self._last_distance_cm = latest_distance
+            now = time.time()
+            if self.logger and (now - self._last_log_ts) >= self.log_interval_sec:
+                within_gate = self._last_distance_cm <= self.distance_threshold_cm
+                self.logger.info(
+                    "DistanceReader: %.2f cm (gate=%s, thr=%.0f)",
+                    self._last_distance_cm,
+                    within_gate,
+                    self.distance_threshold_cm,
+                )
+                self._last_log_ts = now
+
         msg = self.sub.receive()
         if msg is None:
+            return
+
+        # Drop frames if we are too far from the target
+        if self._last_distance_cm is not None and self._last_distance_cm > self.distance_threshold_cm:
             return
         try:
             # expect base64-encoded jpeg string
@@ -228,12 +253,14 @@ class processPerception(WorkerProcess):
     it in `_init_threads`.
     """
 
-    def __init__(self, queueList, logging, ready_event=None, debugging=False):
+    def __init__(self, queueList, logging, ready_event=None, debugging=False, distance_threshold_cm=100.0, distance_log_interval_sec=1.0):
         self.queuesList = queueList
         self.logging = logging
         self.debugging = debugging
         self.ready_event = ready_event
         self._frame_queue = Queue(maxsize=4)
+        self.distance_threshold_cm = distance_threshold_cm
+        self.distance_log_interval_sec = distance_log_interval_sec
         super(processPerception, self).__init__(self.queuesList, ready_event)
         self.model = None
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -253,7 +280,15 @@ class processPerception(WorkerProcess):
 
     def _init_threads(self):
         # Frame reader
-        self.threads.append(FrameReader(self.queuesList, self._frame_queue, self.logging))
+        self.threads.append(
+            FrameReader(
+                self.queuesList,
+                self._frame_queue,
+                self.logging,
+                distance_threshold_cm=self.distance_threshold_cm,
+                log_interval_sec=self.distance_log_interval_sec,
+            )
+        )
 
         # Worker threads (easy to extend)
         # self.threads.append(ObstacleWorker(self._frame_queue, self.queuesList, self.logging))

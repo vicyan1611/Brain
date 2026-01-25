@@ -268,6 +268,14 @@ class SteeringLimits(Enum):
     msgType = "dict"
 
 
+################################# From Sensors ##################################
+class DistanceReading(Enum):
+    Queue = "General"
+    Owner = "threadSensor"
+    msgID = 13
+    msgType = "float"
+
+
 ################################# From Locsys ##################################
 class Location(Enum):
     Queue = "General"

@@ -6,3 +6,4 @@ __pycache__
 *.avi
 perception-yolov8/
 models/
+venv
