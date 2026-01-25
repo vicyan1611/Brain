@@ -63,7 +63,6 @@ from src.hardware.camera.processCamera import processCamera
 from src.hardware.serialhandler.processSerialHandler import processSerialHandler
 from src.data.Semaphores.processSemaphores import processSemaphores
 from src.data.TrafficCommunication.processTrafficCommunication import processTrafficCommunication
-from src.data.processDataCollector import processDataCollector
 from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
 from src.utils.messages.allMessages import StateChange
 from src.statemachine.stateMachine import StateMachine
@@ -71,7 +70,6 @@ from src.statemachine.systemMode import SystemMode
 from src.processing.processPerception import processPerception
 
 # ------ New component imports starts here ------#
-from hardware.sensor.processSensor import processSensor
 
 
 # ------ New component imports ends here ------#
@@ -163,17 +161,9 @@ processTrafficCom = processTrafficCommunication(queueList, logging, 3, traffic_c
 serial_handler_ready = Event()
 processSerialHandler = processSerialHandler(queueList, logging, serial_handler_ready, dashboard_ready, debugging = False)
 
-# Initializing data collector
-data_collector_ready = Event()
-processDataCollector = processDataCollector(queueList, logging, data_collector_ready, debugging = False)
-
-# Initializing distance sensor
-sensor_ready = Event()
-processSensor = processSensor(queueList, logging, sensor_ready, debugging = False)
-
 # Adding all processes to the list
-allProcesses.extend([processCamera, processPerception, processSemaphore, processTrafficCom, processSerialHandler, processDataCollector, processSensor, processDashboard])
-allEvents.extend([camera_ready, perception_ready, semaphore_ready, traffic_com_ready, serial_handler_ready, data_collector_ready, sensor_ready, dashboard_ready])
+allProcesses.extend([processCamera, processPerception, processSemaphore, processTrafficCom, processSerialHandler, processDashboard])
+allEvents.extend([camera_ready, perception_ready, semaphore_ready, traffic_com_ready, serial_handler_ready, dashboard_ready])
 
 # ------ New component initialize starts here ------#
 

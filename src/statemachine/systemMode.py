@@ -165,3 +165,85 @@ class SystemMode(Enum):
             }
         }
     }
+
+    # ===== Added driving/track-specific modes =====
+
+    AUTO_BASE = {
+        "mode": "auto_base",
+        "camera": {"process": {"enabled": True}, "thread": {"resolution": "480p"}},
+        "serial_handler": {"process": {"enabled": True}},
+        "semaphore": {"process": {"enabled": False}},
+        "traffic_com": {"process": {"enabled": False}},
+    }
+
+    HIGHWAY = {
+        "mode": "highway",
+        "camera": {"process": {"enabled": True}, "thread": {"resolution": "480p"}},
+        "serial_handler": {"process": {"enabled": True}},
+        "semaphore": {"process": {"enabled": False}},
+        "traffic_com": {"process": {"enabled": False}},
+    }
+
+    ROUNDABOUT = {
+        "mode": "roundabout",
+        "camera": {"process": {"enabled": True}, "thread": {"resolution": "480p"}},
+        "serial_handler": {"process": {"enabled": True}},
+        "semaphore": {"process": {"enabled": False}},
+        "traffic_com": {"process": {"enabled": False}},
+    }
+
+    TRAFFIC_LIGHT = {
+        "mode": "traffic_light",
+        "camera": {"process": {"enabled": True}, "thread": {"resolution": "480p"}},
+        "serial_handler": {"process": {"enabled": True}},
+        "semaphore": {"process": {"enabled": False}},
+        "traffic_com": {"process": {"enabled": False}},
+    }
+
+    CROSSWALK = {
+        "mode": "crosswalk",
+        "camera": {"process": {"enabled": True}, "thread": {"resolution": "480p"}},
+        "serial_handler": {"process": {"enabled": True}},
+        "semaphore": {"process": {"enabled": False}},
+        "traffic_com": {"process": {"enabled": False}},
+    }
+
+    BUS_LANE = {
+        "mode": "bus_lane",
+        "camera": {"process": {"enabled": True}, "thread": {"resolution": "480p"}},
+        "serial_handler": {"process": {"enabled": True}},
+        "semaphore": {"process": {"enabled": False}},
+        "traffic_com": {"process": {"enabled": False}},
+    }
+
+    PARKING = {
+        "mode": "parking",
+        "camera": {"process": {"enabled": True}, "thread": {"resolution": "480p"}},
+        "serial_handler": {"process": {"enabled": True}},
+        "semaphore": {"process": {"enabled": False}},
+        "traffic_com": {"process": {"enabled": False}},
+    }
+
+    TUNNEL = {
+        "mode": "tunnel",
+        "camera": {"process": {"enabled": True}, "thread": {"resolution": "480p"}},
+        "serial_handler": {"process": {"enabled": True}},
+        "semaphore": {"process": {"enabled": False}},
+        "traffic_com": {"process": {"enabled": False}},
+    }
+
+    LANE_NARROW = {
+        "mode": "lane_narrow",
+        "camera": {"process": {"enabled": True}, "thread": {"resolution": "480p"}},
+        "serial_handler": {"process": {"enabled": True}},
+        "semaphore": {"process": {"enabled": False}},
+        "traffic_com": {"process": {"enabled": False}},
+    }
+
+    EMERGENCY_STOP = {
+        "mode": "emergency_stop",
+        "camera": {"process": {"enabled": True}, "thread": {"resolution": "480p"}},
+        "serial_handler": {"process": {"enabled": True}},
+        "semaphore": {"process": {"enabled": False}},
+        "traffic_com": {"process": {"enabled": False}},
+    }
