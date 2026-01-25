@@ -70,7 +70,7 @@ from src.statemachine.systemMode import SystemMode
 from src.processing.processPerception import processPerception
 
 # ------ New component imports starts here ------#
-from hardware.sensor.processSensor import processSensor
+from src.hardware.sensor.processSensor import processSensor
 
 
 # ------ New component imports ends here ------#
