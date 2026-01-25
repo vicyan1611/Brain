@@ -198,12 +198,129 @@ class ObstacleWorker(BasePerceptionWorker):
 
 
 class LaneWorker(BasePerceptionWorker):
-    """Simple lane detection placeholder; computes steering angle and sends it."""
+    """
+    Lane Detection using Histogram & Dynamic Thresholding (Ported from C++ Team Code).
+    """
 
     def __init__(self, frame_queue, queuesList, logger=None, pause=0.02):
         super(LaneWorker, self).__init__(frame_queue, queuesList, logger, pause)
         self.steer_sender = messageHandlerSender(queuesList, SteerMotor)
         self.lane_sender = messageHandlerSender(queuesList, LaneKeeping)
+        self.speed_sender = messageHandlerSender(queuesList, SpeedMotor) # Cần để dừng khi gặp Stopline
+
+        # Tuning Parameters
+        self.kp = 0.15          # Hệ số đánh lái (Tune: 0.1 -> 0.5)
+        self.max_angle = 25     # Góc lái tối đa
+        self.prev_center = 320  # Giả sử tâm ảnh là 320 (với ảnh 640x480)
+        
+        # Logic stopline
+        self.stopline_detected = False
+
+    def extract_lanes(self, hist_data):
+        """
+        Tìm các chỉ số cột (index) nơi bắt đầu hoặc kết thúc vạch kẻ đường.
+        Logic: Chuyển từ 0 lên cao (edge lên) hoặc từ cao xuống 0 (edge xuống).
+        """
+        lane_indices = []
+        previous_value = 0
+        
+        # hist_data là mảng 1 chiều (640 phần tử)
+        for idx, value in enumerate(hist_data):
+            # Threshold 1500 tương đương khoảng 6 pixel trắng (255*6 ~ 1530)
+            if value >= 1500 and previous_value == 0:
+                lane_indices.append(idx)
+                previous_value = 255
+            elif value == 0 and previous_value == 255:
+                lane_indices.append(idx)
+                previous_value = 0
+                
+        # Nếu số lượng điểm lẻ, thêm điểm cuối cùng của ảnh vào
+        if len(lane_indices) % 2 == 1:
+            lane_indices.append(len(hist_data) - 1)
+            
+        return lane_indices
+
+    def process_histogram_algorithm(self, frame):
+        """
+        Logic chính port từ hàm optimized_histogram của C++
+        """
+        h, w = frame.shape[:2]
+        self.stopline_detected = False
+        
+        # 1. Convert to Grayscale
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        
+        # 2. ROI Selection (Bottom part of image like C++ code: y=384, h=96)
+        # Lưu ý: C++ dùng cv::Rect(0, 384, 640, 96)
+        roi_y_start = 384
+        if roi_y_start >= h: roi_y_start = h - 100 # Fallback nếu ảnh nhỏ hơn
+        roi = gray[roi_y_start:h, 0:w]
+        
+        # 3. Dynamic Thresholding (Key Feature!)
+        minVal, maxVal, minLoc, maxLoc = cv2.minMaxLoc(roi)
+        
+        # Logic C++: double threshold_value = std::min(std::max(maxVal - 55.0, 30.0), 200.0);
+        threshold_value = max(maxVal - 55.0, 30.0)
+        threshold_value = min(threshold_value, 200.0)
+        
+        _, thresh = cv2.threshold(roi, threshold_value, 255, cv2.THRESH_BINARY)
+        
+        # 4. Histogram Calculation (Reduce sum columns)
+        # Axis 0 là cộng dồn theo cột dọc
+        hist = np.sum(thresh, axis=0) 
+        
+        # 5. Extract Lanes
+        lanes = self.extract_lanes(hist)
+        centers = []
+        
+        # Tính trung điểm từng cặp vạch (lanes[2*i] và lanes[2*i+1])
+        # lanes structure: [start_L, end_L, start_R, end_R, ...]
+        num_pairs = len(lanes) // 2
+        for i in range(num_pairs):
+            start = lanes[2 * i]
+            end = lanes[2 * i + 1]
+            width_lane = abs(start - end)
+            
+            # Logic C++ Stopline: abs(...) > 350 && thresh > 50
+            if width_lane > 350 and threshold_value > 50:
+                self.stopline_detected = True
+                return w / 2.0, threshold_value # Return center mặc định nếu gặp stopline
+            
+            # Logic lọc nhiễu: chỉ lấy vạch có độ rộng > 3 pixel
+            if width_lane > 3:
+                centers.append((start + end) / 2.0)
+
+        # 6. Calculate Final Center based on visible lanes
+        target_center = w / 2.0
+        
+        if not centers:
+            # Không thấy đường -> Giữ lái thẳng hoặc giá trị cũ
+            target_center = w / 2.0
+        elif len(centers) == 1:
+            # Chỉ thấy 1 vạch
+            c = centers[0]
+            if c > (w / 2.0):
+                # Thấy vạch phải -> xe đang lệch trái -> Tâm đường nằm bên trái vạch này
+                # Logic C++: (centers[0] - 0) / 2 ... Hơi lạ, logic này có thể làm xe bám sát lề
+                # Ta sẽ điều chỉnh logic này an toàn hơn: Giả sử đường rộng 300px
+                target_center = c - 150 
+            else:
+                # Thấy vạch trái
+                target_center = c + 150
+        elif abs(centers[0] - centers[-1]) < 200:
+             # Hai vạch quá gần nhau -> Có thể là nhiễu hoặc đường hẹp, lấy trung bình
+             avg = (centers[0] + centers[-1]) / 2.0
+             if avg > w: 
+                 target_center = w/2 # Fallback
+             else:
+                 target_center = (centers[0] + centers[-1] + w) / 2 if avg > w/2 else (centers[0] + centers[-1])/2
+                 # Đoạn logic C++ khúc này hơi rối rắm, ta đơn giản hóa:
+                 target_center = (centers[0] + centers[-1]) / 2.0
+        else:
+            # Trường hợp lý tưởng: Thấy vạch trái ngoài cùng và vạch phải ngoài cùng
+            target_center = (centers[0] + centers[-1]) / 2.0
+
+        return target_center, threshold_value
 
     def thread_work(self):
         try:
@@ -211,33 +328,60 @@ class LaneWorker(BasePerceptionWorker):
         except Empty:
             return
 
+        if frame is None or getattr(frame, "size", 0) == 0:
+            return
+
         try:
-            # Placeholder lane algorithm: compute center of bright region as lane center
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            _, thr = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
-            moments = cv2.moments(thr)
             h, w = frame.shape[:2]
-            if moments["m00"] != 0:
-                cx = int(moments["m10"] / moments["m00"])
-                offset = (cx - w // 2)
-                # simple proportional steering (tune in real system)
-                steering_angle = -offset * 0.1
-                # send steer and lane offset
+            img_center_x = w // 2
+            
+            # === CHẠY THUẬT TOÁN HISTOGRAM ===
+            lane_center, thresh_val = self.process_histogram_algorithm(frame)
+            
+            # === XỬ LÝ STOPLINE ===
+            if self.stopline_detected:
+                # Gửi lệnh dừng xe
                 try:
-                    self.steer_sender.send(str(int(steering_angle)))
-                except Exception:
-                    pass
-                try:
-                    self.lane_sender.send(int(offset))
-                except Exception:
-                    pass
+                    self.speed_sender.send("0")
+                    self.lane_sender.send("STOPLINE DETECTED")
+                except: pass
+                # Reset steering về 0
+                steering_angle = 0
             else:
-                # no lane detected
+                # === TÍNH GÓC LÁI (PID P-Controller) ===
+                # Error = Tâm đường mong muốn - Tâm xe (giữa ảnh)
+                error = lane_center - img_center_x
+                
+                # C++ Logic có đoạn previous_center smoothing, ta áp dụng nhẹ
+                # Low-pass filter để góc lái mượt hơn
+                lane_center = 0.7 * lane_center + 0.3 * self.prev_center
+                self.prev_center = lane_center
+                
+                # Tính lại error sau khi smooth
+                error = lane_center - img_center_x
+                
+                steering_angle = int(error * self.kp)
+                
+                # Clamp góc lái
+                steering_angle = max(-self.max_angle, min(self.max_angle, steering_angle))
+                
+                # Gửi tín hiệu lái
+                try:
+                    self.steer_sender.send(str(steering_angle))
+                except Exception:
+                    pass
+
+            # === DEBUG INFO ===
+            try:
+                msg = (f"Steer:{steering_angle} | Center:{int(lane_center)} | "
+                       f"Thresh:{int(thresh_val)} | Stop:{self.stopline_detected}")
+                self.lane_sender.send(msg)
+            except Exception:
                 pass
+
         except Exception as e:
             if self.logger:
-                self.logger.debug("LaneWorker error: %s", e)
-
+                self.logger.debug("LaneWorker Hist Error: %s", e)
 
 class processPerception(WorkerProcess):
     """Perception process that starts a frame reader and multiple worker threads.

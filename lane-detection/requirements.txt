@@ -1,0 +1,7 @@
+opencv-python
+numpy
+matplotlib
+pandas
+moviepy==1.0.3
+scikit-learn
+moviepy
