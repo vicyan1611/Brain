@@ -10,6 +10,9 @@ try:
 except ImportError:
 	DistanceSensor = None  # allows the module to import on non-RPi machines
 
+ECHO=16
+TRIGGER=20
+
 class DistanceReader(ThreadWithStop):
 	"""Polls a gpiozero DistanceSensor and publishes median-filtered distance."""
 
@@ -23,7 +26,7 @@ class DistanceReader(ThreadWithStop):
 		if DistanceSensor is None:
 			raise RuntimeError("gpiozero not available; run on Raspberry Pi or install gpiozero")
 		# BCM pins: echo=23, trigger=24 by default (as provided by the user)
-		self.sensor = DistanceSensor(echo=23, trigger=24, max_distance=max_distance)
+		self.sensor = DistanceSensor(echo=ECHO, trigger=TRIGGER, max_distance=max_distance)
 
 	def thread_work(self):
 		try:

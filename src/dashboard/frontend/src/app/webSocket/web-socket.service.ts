@@ -76,7 +76,7 @@ export class WebSocketService {
   ]);
 
   constructor() {
-    const socketUrl = "http://192.168.1.24:5005";
+    const socketUrl = "http://192.168.0.126:5005";
     this.backendHttpUrl = socketUrl;
 
     this.webSocket = new Socket({
