@@ -38,8 +38,9 @@ import eventlet
 import os
 import time
 import datetime
+from pathlib import Path
 
-from flask import Flask, request
+from flask import Flask, request, send_file
 from flask_socketio import SocketIO
 from flask_cors import CORS
 from enum import Enum
@@ -105,12 +106,15 @@ class processDashboard(WorkerProcess):
 
         # configuration
         self.table_state_file = self._get_table_state_path()
+        self.data_collection_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'temp', 'data_collection')
+        os.makedirs(self.data_collection_dir, exist_ok=True)
         
 
         # setup flask and socketio
         self.app = Flask(__name__)
         self.socketio = SocketIO(self.app, cors_allowed_origins="*", async_mode='eventlet')
         CORS(self.app, supports_credentials=True)
+        self._setup_routes()
 
         # calibration
         self.calibration = Calibration(self.queueList, self.socketio)
@@ -143,6 +147,29 @@ class processDashboard(WorkerProcess):
         self.socketio.on_event('save', self.handle_save_table_state)
         self.socketio.on_event('load', self.handle_load_table_state)
         self.socketio.on_event('get_brain_monitor_log', self.handle_get_brain_monitor_log)
+
+
+    def _setup_routes(self):
+        """Register lightweight HTTP routes for downloads."""
+
+        @self.app.route('/api/data-collection/latest', methods=['GET'])
+        def download_latest_data():  # type: ignore
+            latest = self._get_latest_zip_path()
+            if latest:
+                return send_file(latest, as_attachment=True)
+            return ("No data available", 404)
+
+
+    def _get_latest_zip_path(self):
+        """Return the newest data collection zip path or None."""
+        search_dir = Path(self.data_collection_dir)
+        if not search_dir.exists():
+            return None
+
+        zip_files = sorted(search_dir.glob('*.zip'), key=lambda p: p.stat().st_mtime, reverse=True)
+        if not zip_files:
+            return None
+        return zip_files[0]
     
     
     def _start_background_tasks(self):
@@ -246,6 +273,8 @@ class processDashboard(WorkerProcess):
                 self.handle_driving_mode(dataDict)
             elif dataName == "Calibration":
                 self.handle_calibration(dataDict, socketId)
+            elif dataName == "DataCollection":
+                self.handle_data_collection(dataDict, socketId)
             elif dataName == "GetCurrentSerialConnectionState":
                 self.handle_get_current_serial_connection_state(socketId)
             else:
@@ -272,6 +301,22 @@ class processDashboard(WorkerProcess):
     def handle_calibration(self, dataDict, socketId):
         """Handle calibration signals from frontend."""
         self.calibration.handle_calibration_signal(dataDict, socketId)
+
+
+    def handle_data_collection(self, dataDict, socketId):
+        """Forward data collection start/stop commands to the collector process."""
+        payload = {
+            "Action": dataDict.get("Action"),
+            "Meta": dataDict.get("Meta", {}),
+            "RequestedBy": socketId,
+        }
+
+        sender = self.sendMessages.get("DataCollectionCommand")
+        if sender:
+            sender["obj"].send(payload)
+
+        # Provide quick acknowledgement to caller
+        self.socketio.emit('data_collection_ack', {'data': payload}, room=socketId)
 
 
     def handle_get_current_serial_connection_state(self, socketId):

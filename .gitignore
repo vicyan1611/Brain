@@ -3,3 +3,6 @@ docs/build/
 __pycache__
 **/*.pyc
 /src/dashboard/frontend/node_modules
+FLOW_DIAGRAM.md
+temp/data_collection/
+*.zip

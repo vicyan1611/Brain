@@ -26,53 +26,61 @@
 // OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-import { Injectable } from '@angular/core';
-import { Socket } from 'ngx-socket-io';
-import { Observable, Subject } from 'rxjs';
+import { Injectable } from "@angular/core";
+import { Socket } from "ngx-socket-io";
+import { Observable, Subject } from "rxjs";
 @Injectable({
-  providedIn: 'root',
+  providedIn: "root",
 })
 export class WebSocketService {
   private webSocket: Socket;
-  private connectionStatusSubject = new Subject<'connected' | 'disconnected' | 'error'>();
+  private backendHttpUrl: string;
+  private connectionStatusSubject = new Subject<
+    "connected" | "disconnected" | "error"
+  >();
   connectionStatus$ = this.connectionStatusSubject.asObservable();
 
-  private eventSubject = new Subject<{ channel: string, data: any }>();
+  private eventSubject = new Subject<{ channel: string; data: any }>();
   private handledEvents = new Set([
-    'heartbeat',
-    'heartbeat_disconnect',
-    'StateChange',
-    'memory_channel',
-    'cpu_channel',
-    'disk_channel',
-    'webCamera',
-    'Location',
-    'Cars',
-    'Semaphores',
-    'after connect',
-    'InstantConsumption',
-    'loadBack',
-    'WarningSignal',
-    'response',
-    'BatteryLvl',
-    'ResourceMonitor',
-    'serialCamera',
-    'Recording',
-    'CurrentSpeed',
-    'CurrentSteer',
-    'EnableButton',
-    'SteeringLimits',
-    'Calibration',
-    'CalibPWMData',
-    'CalibRunDone',
-    'ImuAck',
-    'console_log',
-    'brain_monitor_log'
+    "heartbeat",
+    "heartbeat_disconnect",
+    "StateChange",
+    "memory_channel",
+    "cpu_channel",
+    "disk_channel",
+    "webCamera",
+    "Location",
+    "Cars",
+    "Semaphores",
+    "after connect",
+    "InstantConsumption",
+    "loadBack",
+    "WarningSignal",
+    "response",
+    "BatteryLvl",
+    "ResourceMonitor",
+    "serialCamera",
+    "Recording",
+    "CurrentSpeed",
+    "CurrentSteer",
+    "EnableButton",
+    "SteeringLimits",
+    "Calibration",
+    "CalibPWMData",
+    "CalibRunDone",
+    "ImuAck",
+    "console_log",
+    "brain_monitor_log",
+    "DataCollectionStatus",
+    "data_collection_ack",
   ]);
 
   constructor() {
+    const socketUrl = "http://192.168.1.24:5005";
+    this.backendHttpUrl = socketUrl;
+
     this.webSocket = new Socket({
-      url: "http://192.168.1.24:5005",
+      url: socketUrl,
       options: {},
     });
 
@@ -83,167 +91,166 @@ export class WebSocketService {
       }
     });
 
-    this.webSocket.ioSocket.on('connect', () => {
-      this.connectionStatusSubject.next('connected');
+    this.webSocket.ioSocket.on("connect", () => {
+      this.connectionStatusSubject.next("connected");
     });
 
-    this.webSocket.ioSocket.on('disconnect', () => {
-      this.connectionStatusSubject.next('disconnected');
+    this.webSocket.ioSocket.on("disconnect", () => {
+      this.connectionStatusSubject.next("disconnected");
     });
 
-    this.webSocket.ioSocket.on('connect_error', (error: any) => {
-      this.connectionStatusSubject.next('error');
+    this.webSocket.ioSocket.on("connect_error", (error: any) => {
+      this.connectionStatusSubject.next("error");
     });
 
-    this.webSocket.ioSocket.on('reconnect', () => {
-      this.connectionStatusSubject.next('connected');
+    this.webSocket.ioSocket.on("reconnect", () => {
+      this.connectionStatusSubject.next("connected");
     });
 
-    this.webSocket.ioSocket.on('reconnect_attempt', () => {
-    });
+    this.webSocket.ioSocket.on("reconnect_attempt", () => {});
 
-    this.webSocket.ioSocket.on('reconnect_error', (error: any) => {
-      this.connectionStatusSubject.next('error');
+    this.webSocket.ioSocket.on("reconnect_error", (error: any) => {
+      this.connectionStatusSubject.next("error");
     });
   }
 
   // Method to start connection/handshake with the server
   sendMessageToFlask(message: any) {
-    this.webSocket.emit('message', message);
+    this.webSocket.emit("message", message);
   }
 
   SaveTable(message: any) {
-    this.webSocket.emit('save', message);
+    this.webSocket.emit("save", message);
   }
 
   LoadTable(message: any) {
-    this.webSocket.emit('load', message);
+    this.webSocket.emit("load", message);
   }
 
   receiveHeartbeat(): Observable<any> {
-    return this.webSocket.fromEvent('heartbeat');
+    return this.webSocket.fromEvent("heartbeat");
   }
 
   receiveHeartbeatDisconnect(): Observable<any> {
-    return this.webSocket.fromEvent('heartbeat_disconnect');
+    return this.webSocket.fromEvent("heartbeat_disconnect");
   }
 
   receiveSessionAccess(): Observable<any> {
-    return this.webSocket.fromEvent('session_access');
+    return this.webSocket.fromEvent("session_access");
   }
 
   receiveCurrentSerialConnectionState(): Observable<any> {
-    return this.webSocket.fromEvent('current_serial_connection_state');
+    return this.webSocket.fromEvent("current_serial_connection_state");
   }
 
   // Method to receive memory usage updates
   receiveMemoryUsage(): Observable<any> {
-    return this.webSocket.fromEvent('memory_channel');
+    return this.webSocket.fromEvent("memory_channel");
   }
 
   receiveImuData(): Observable<any> {
-    return this.webSocket.fromEvent('ImuData');
+    return this.webSocket.fromEvent("ImuData");
   }
 
   receiveResourceMonitor(): Observable<any> {
-    return this.webSocket.fromEvent('ResourceMonitor');
+    return this.webSocket.fromEvent("ResourceMonitor");
   }
 
   receiveWarningSignal(): Observable<any> {
-    return this.webSocket.fromEvent('WarningSignal');
+    return this.webSocket.fromEvent("WarningSignal");
   }
 
   receiveLoadTable(): Observable<any> {
-    return this.webSocket.fromEvent('loadBack');
+    return this.webSocket.fromEvent("loadBack");
   }
 
   // Method to receive CPU usage updates
   receiveCpuUsage(): Observable<any> {
-    return this.webSocket.fromEvent('cpu_channel');
+    return this.webSocket.fromEvent("cpu_channel");
   }
 
   // Method to receive image updates
   receiveCamera(): Observable<any> {
-    return this.webSocket.fromEvent('serialCamera');
+    return this.webSocket.fromEvent("serialCamera");
   }
 
   // Method to receive location updates
   receiveLocation(): Observable<any> {
-    return this.webSocket.fromEvent('Location');
+    return this.webSocket.fromEvent("Location");
   }
 
   // Method to get Enable Buton signal
   receiveEnableButton(): Observable<any> {
-    return this.webSocket.fromEvent('EnableButton');
+    return this.webSocket.fromEvent("EnableButton");
   }
 
   // Method to receive cars location updates
   receiveCars(): Observable<any> {
-    return this.webSocket.fromEvent('Cars');
+    return this.webSocket.fromEvent("Cars");
   }
 
   // Method to receive instant consumption updates
   receiveInstantConsumption(): Observable<any> {
-    return this.webSocket.fromEvent('InstantConsumption');
+    return this.webSocket.fromEvent("InstantConsumption");
   }
 
   // Method to receive battery level updates
   receiveBatteryLevel(): Observable<any> {
-    return this.webSocket.fromEvent('BatteryLvl');
+    return this.webSocket.fromEvent("BatteryLvl");
   }
 
   // Method to receive semaphores state updates
   receiveSemaphores(): Observable<any> {
-    return this.webSocket.fromEvent('Semaphores');
+    return this.webSocket.fromEvent("Semaphores");
   }
 
   // Method to receive current speed state updates
   receiveCurrentSpeed(): Observable<any> {
-    return this.webSocket.fromEvent('CurrentSpeed');
+    return this.webSocket.fromEvent("CurrentSpeed");
   }
 
   // Method to receive current speed state updates
   receiveCurrentSteer(): Observable<any> {
-    return this.webSocket.fromEvent('CurrentSteer');
+    return this.webSocket.fromEvent("CurrentSteer");
   }
 
   // Method to receive current speed state updates
   receiveSerialConnectionState(): Observable<any> {
-    return this.webSocket.fromEvent('SerialConnectionState');
+    return this.webSocket.fromEvent("SerialConnectionState");
   }
 
   receiveCalibrationData(): Observable<any> {
-    return this.webSocket.fromEvent('Calibration');
+    return this.webSocket.fromEvent("Calibration");
   }
 
   receiveSteerLimits(): Observable<any> {
-    return this.webSocket.fromEvent('SteeringLimits');
+    return this.webSocket.fromEvent("SteeringLimits");
   }
 
   receiveNucleoAlive(): Observable<any> {
-    return this.webSocket.fromEvent('AliveSignal');
+    return this.webSocket.fromEvent("AliveSignal");
   }
 
   receiveConsoleLog(): Observable<any> {
-    return this.webSocket.fromEvent('console_log');
+    return this.webSocket.fromEvent("console_log");
   }
 
   // Method to receive the initial connection confirmation
   onConnect(): Observable<any> {
-    return this.webSocket.fromEvent('after connect');
+    return this.webSocket.fromEvent("after connect");
   }
 
   isConnected(): boolean {
     return this.webSocket.ioSocket.connected;
   }
 
-  getConnectionStatus(): 'connected' | 'disconnected' | 'error' {
+  getConnectionStatus(): "connected" | "disconnected" | "error" {
     if (this.webSocket.ioSocket.connected) {
-      return 'connected';
+      return "connected";
     } else if (this.webSocket.ioSocket.disconnected) {
-      return 'disconnected';
+      return "disconnected";
     } else {
-      return 'error';
+      return "error";
     }
   }
 
@@ -261,17 +268,29 @@ export class WebSocketService {
   }
 
   // Method to receive any unhandled event
-  receiveUnhandledEvents(): Observable<{ channel: string, data: any }> {
+  receiveUnhandledEvents(): Observable<{ channel: string; data: any }> {
     return this.eventSubject.asObservable();
   }
 
   // Request to get brain monitor log
-  requestBrainMonitorLog() : void {
-    this.webSocket.emit('get_brain_monitor_log', {});
+  requestBrainMonitorLog(): void {
+    this.webSocket.emit("get_brain_monitor_log", {});
   }
 
   // Receive brain monitor log
-  receiveBrainMonitorLog() : Observable<any> {
-    return this.webSocket.fromEvent('brain_monitor_logs');
+  receiveBrainMonitorLog(): Observable<any> {
+    return this.webSocket.fromEvent("brain_monitor_logs");
+  }
+
+  receiveDataCollectionStatus(): Observable<any> {
+    return this.webSocket.fromEvent("DataCollectionStatus");
+  }
+
+  receiveDataCollectionAck(): Observable<any> {
+    return this.webSocket.fromEvent("data_collection_ack");
+  }
+
+  getBackendHttpUrl(): string {
+    return this.backendHttpUrl;
   }
 }

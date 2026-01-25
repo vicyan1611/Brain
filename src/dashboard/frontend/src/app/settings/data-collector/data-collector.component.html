@@ -1,0 +1,31 @@
+<div class="collector-card">
+    <div class="collector-header">
+        <div>
+            <p class="eyebrow">Data collection</p>
+            <h3>Record video + telemetry</h3>
+        </div>
+        <span class="status" [class.recording]="isRecording">● {{ isRecording ? 'RECORDING' : 'IDLE' }}</span>
+    </div>
+
+    <div class="collector-body">
+        <div class="stat">
+            <span class="label">Session</span>
+            <span class="value">{{ session || 'N/A' }}</span>
+        </div>
+        <div class="stat">
+            <span class="label">Frames</span>
+            <span class="value">{{ frames }}</span>
+        </div>
+        <div class="stat message">{{ message }}</div>
+    </div>
+
+    <div class="collector-actions">
+        <button class="btn start" [disabled]="isRecording" (click)="startRecording()">Start</button>
+        <button class="btn stop" [disabled]="!isRecording" (click)="stopRecording()">Stop</button>
+        <button class="btn ghost" [disabled]="isRecording" (click)="downloadLatest()">Download latest</button>
+    </div>
+
+    <div *ngIf="lastZipUrl" class="download-hint">
+        Latest ZIP ready: <a [href]="lastZipUrl" target="_blank">Open</a>
+    </div>
+</div>

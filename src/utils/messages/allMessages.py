@@ -193,6 +193,21 @@ class RequestSteerLimits(Enum):
     msgID = 20
     msgType = "bool"
 
+# Data collection control from dashboard
+class DataCollectionCommand(Enum):
+    Queue = "General"
+    Owner = "Dashboard"
+    msgID = 21
+    msgType = "dict"
+
+
+################################# From Data Collector ##################################
+class DataCollectionStatus(Enum):
+    Queue = "General"
+    Owner = "DataCollector"
+    msgID = 1
+    msgType = "dict"
+
 
 ################################# From Nucleo ##################################
 class BatteryLvl(Enum):
