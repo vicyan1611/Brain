@@ -75,6 +75,9 @@ from hardware.sensor.processSensor import processSensor
 
 # ------ New component imports ends here ------#
 
+logging = logging.getLogger()
+
+
 # ===================================== SHUTDOWN PROCESS ====================================
 
 def shutdown_process(process, timeout=1):
@@ -87,6 +90,7 @@ def shutdown_process(process, timeout=1):
         if process.is_alive():
             print(f"The process {process} is still alive after terminate, killing it!")
             process.kill()  # last resort
+    logging.info(f"The process {process} has been stopped")
     print(f"The process {process} stopped")
 
 # ===================================== PROCESS MANAGEMENT ==================================
@@ -118,7 +122,6 @@ queueList = {
     "Config": Queue(),
     "Log": Queue(),
 }
-logging = logging.getLogger()
 
 original_stdout = sys.stdout
 original_stderr = sys.stderr

@@ -7,3 +7,4 @@ __pycache__
 perception-yolov8/
 models/
 venv
+lane-detection

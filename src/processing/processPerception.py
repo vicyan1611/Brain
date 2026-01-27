@@ -13,6 +13,7 @@ from src.utils.messages.allMessages import (
     Brake,
     DistanceReading,
 )
+from src.processing.lane_detection import LaneCurveEstimator
 
 import base64
 import numpy as np
@@ -205,41 +206,35 @@ class ObstacleWorkerYOLO(BasePerceptionWorker):
         
 
 class LaneWorker(BasePerceptionWorker):
-    """Simple lane detection placeholder; computes steering angle and sends it."""
+    """Lane detection using histogram-based curve estimator."""
 
-    def __init__(self, frame_queue, queuesList, logger=None, pause=0.02):
+    def __init__(self, frame_queue, queuesList, logger=None, pause=0.02, steer_gain=0.1):
         super(LaneWorker, self).__init__(frame_queue, queuesList, logger, pause)
         self.steer_sender = messageHandlerSender(queuesList, SteerMotor)
         self.lane_sender = messageHandlerSender(queuesList, LaneKeeping)
+        self.estimator = LaneCurveEstimator()
+        self.steer_gain = steer_gain
 
     def thread_work(self):
         try:
             frame = self.q.get(timeout=0.5)
         except Empty:
             return
-
         try:
-            # Placeholder lane algorithm: compute center of bright region as lane center
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            _, thr = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
-            moments = cv2.moments(thr)
-            h, w = frame.shape[:2]
-            if moments["m00"] != 0:
-                cx = int(moments["m10"] / moments["m00"])
-                offset = (cx - w // 2)
-                # simple proportional steering (tune in real system)
-                steering_angle = -offset * 0.1
-                # send steer and lane offset
-                try:
-                    self.steer_sender.send(str(int(steering_angle)))
-                except Exception:
-                    pass
-                try:
-                    self.lane_sender.send(int(offset))
-                except Exception:
-                    pass
-            else:
-                # no lane detected
+            curve = self.estimator.process(frame)
+            steering_angle = -curve * self.steer_gain
+            steering_angle = max(min(steering_angle, 100), -100)
+
+            if self.logger:
+                self.logger.debug("LaneWorker curve=%d steer=%.2f", curve, steering_angle)
+
+            try:
+                self.steer_sender.send(str(int(steering_angle)))
+            except Exception:
+                pass
+            try:
+                self.lane_sender.send(int(curve))
+            except Exception:
                 pass
         except Exception as e:
             if self.logger:
