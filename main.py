@@ -150,8 +150,8 @@ camera_ready = Event()
 processCamera = processCamera(queueList, logging, camera_ready, debugging = False)
 
 # Initializing perception processor
-perception_ready = Event()
-processPerception = processPerception(queueList, logging, perception_ready, debugging = False)
+# perception_ready = Event()
+# processPerception = processPerception(queueList, logging, perception_ready, debugging = False)
 
 # Initializing semaphores
 semaphore_ready = Event()
@@ -170,8 +170,10 @@ sensor_ready = Event()
 processSensor = processSensor(queueList, logging, sensor_ready, debugging = False)
 
 # Adding all processes to the list
-allProcesses.extend([processCamera, processPerception, processSemaphore, processTrafficCom, processSerialHandler, processDashboard, processSensor])
-allEvents.extend([camera_ready, perception_ready, semaphore_ready, traffic_com_ready, serial_handler_ready, dashboard_ready, sensor_ready])
+# allProcesses.extend([processCamera, processPerception, processSemaphore, processTrafficCom, processSerialHandler, processDashboard, processSensor])
+# allEvents.extend([camera_ready, perception_ready, semaphore_ready, traffic_com_ready, serial_handler_ready, dashboard_ready, sensor_ready])
+allProcesses.extend([processCamera, processSemaphore, processTrafficCom, processSerialHandler, processDashboard, processSensor])
+allEvents.extend([camera_ready, semaphore_ready, traffic_com_ready, serial_handler_ready, dashboard_ready, sensor_ready])
 
 # ------ New component initialize starts here ------#
 
