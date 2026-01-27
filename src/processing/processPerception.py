@@ -22,7 +22,61 @@ import time
 from queue import Queue, Full, Empty
 import torch
 import ultralytics
+from scipy.interpolate import CubicSpline
 
+class AdaptiveController:
+    """
+    Điều khiển thích nghi dùng Cubic Spline.
+    Input: Offset, Heading.
+    Output: Steering Angle (deg), Speed (unit).
+    """
+    def __init__(self):
+        # Cấu hình
+        self.max_speed = 50     # Chạy thẳng
+        self.min_speed = 20     # Vào cua
+        
+        self.alpha_straight = np.deg2rad(2)   # Ngưỡng đường thẳng (rad)
+        self.alpha_curve = np.deg2rad(15)     # Ngưỡng cua gắt (rad)
+
+        self.Kp_straight = 0.6
+        self.Kp_curve = 1.5
+
+        # Cubic Spline Interpolation
+        self.speed_spline = CubicSpline(
+            [self.alpha_straight, self.alpha_curve], 
+            [self.max_speed, self.min_speed],
+            bc_type=((1, 0.0), (1, 0.0))
+        )
+        
+        self.gain_spline = CubicSpline(
+            [self.alpha_straight, self.alpha_curve],
+            [self.Kp_straight, self.Kp_curve],
+            bc_type=((1, 0.0), (1, 0.0))
+        )
+
+    def get_control(self, offset, heading_error):
+        abs_alpha = abs(heading_error)
+
+        # 1. Tính toán Speed & Gain
+        if abs_alpha <= self.alpha_straight:
+            target_speed = self.max_speed
+            kp = self.Kp_straight
+        elif abs_alpha >= self.alpha_curve:
+            target_speed = self.min_speed
+            kp = self.Kp_curve
+        else:
+            target_speed = float(self.speed_spline(abs_alpha))
+            kp = float(self.gain_spline(abs_alpha))
+
+        # 2. Tính Steering (Stanley-like PD)
+        # steering = -Kp * offset - Kd * heading
+        steering_angle_rad = -kp * offset - 0.8 * heading_error
+        
+        # Đổi ra độ và giới hạn
+        steering_angle_deg = np.rad2deg(steering_angle_rad)
+        steering_angle_deg = np.clip(steering_angle_deg, -25, 25)
+
+        return steering_angle_deg, target_speed
 
 class FrameReader(ThreadWithStop):
     """Reads frames from `serialCamera` messages and pushes decoded frames into a local queue."""
@@ -206,14 +260,21 @@ class ObstacleWorkerYOLO(BasePerceptionWorker):
         
 
 class LaneWorker(BasePerceptionWorker):
-    """Lane detection using histogram-based curve estimator."""
-
-    def __init__(self, frame_queue, queuesList, logger=None, pause=0.02, steer_gain=0.1):
+    """
+    Lane detection worker that uses Adaptive Controller.
+    Controls BOTH Steer and Speed based on road curvature.
+    """
+    def __init__(self, frame_queue, queuesList, logger=None, pause=0.02):
         super(LaneWorker, self).__init__(frame_queue, queuesList, logger, pause)
+        
+        # Senders
         self.steer_sender = messageHandlerSender(queuesList, SteerMotor)
+        self.speed_sender = messageHandlerSender(queuesList, SpeedMotor) 
         self.lane_sender = messageHandlerSender(queuesList, LaneKeeping)
+        
+        # Khởi tạo Logic
         self.estimator = LaneCurveEstimator()
-        self.steer_gain = steer_gain
+        self.controller = AdaptiveController() 
 
     def thread_work(self):
         try:
@@ -221,21 +282,28 @@ class LaneWorker(BasePerceptionWorker):
         except Empty:
             return
         try:
-            curve = self.estimator.process(frame)
-            steering_angle = -curve * self.steer_gain
-            steering_angle = max(min(steering_angle, 100), -100)
+            # 1. Perception: Lấy thông số từ ảnh
+            offset, curvature, heading, _ = self.estimator.process(frame)
+            
+            # 2. Control: Tính góc lái và tốc độ
+            steer_deg, target_speed = self.controller.get_control(offset, heading)
+            
+            # 3. Actuation: Gửi tín hiệu
+            # Gửi góc lái (float string)
+            self.steer_sender.send(str(float(steer_deg)))
 
+            # Gửi tốc độ (int string)
+            # Lưu ý: Cần cơ chế priority để không ghi đè lệnh dừng của ObstacleWorker
+            # (Thường thì ObstacleWorker gửi tốc độ 0 sẽ ghi đè cái này nếu kiến trúc message handler tốt)
+            self.speed_sender.send(str(int(target_speed)))
+
+            # Debug log
             if self.logger:
-                self.logger.debug("LaneWorker curve=%d steer=%.2f", curve, steering_angle)
+                self.logger.debug(
+                    "Lane: Off=%.2f Head=%.2f | Steer=%.1f Speed=%d", 
+                    offset, np.rad2deg(heading), steer_deg, int(target_speed)
+                )
 
-            try:
-                self.steer_sender.send(str(int(steering_angle)))
-            except Exception:
-                pass
-            try:
-                self.lane_sender.send(int(curve))
-            except Exception:
-                pass
         except Exception as e:
             if self.logger:
                 self.logger.debug("LaneWorker error: %s", e)
@@ -288,18 +356,18 @@ class processPerception(WorkerProcess):
         # Worker threads (easy to extend)
         # self.threads.append(ObstacleWorker(self._frame_queue, self.queuesList, self.logging))
 
-        self.threads.append(
-            ObstacleWorkerYOLO(
-                self._frame_queue,
-                self.queuesList,
-                self.logging,
-                yolo_model=self.model,
-                device=self.device,
-                lock=self.model_lock,
-                score_thr=0.35,
-                save_dir=self.save_dir,
-            )
-        )
+        # self.threads.append(
+        #     ObstacleWorkerYOLO(
+        #         self._frame_queue,
+        #         self.queuesList,
+        #         self.logging,
+        #         yolo_model=self.model,
+        #         device=self.device,
+        #         lock=self.model_lock,
+        #         score_thr=0.35,
+        #         save_dir=self.save_dir,
+        #     )
+        # )
         
         self.threads.append(LaneWorker(self._frame_queue, self.queuesList, self.logging))
 
