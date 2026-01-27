@@ -75,6 +75,9 @@ from src.hardware.sensor.processSensor import processSensor
 
 # ------ New component imports ends here ------#
 
+logging = logging.getLogger()
+
+
 # ===================================== SHUTDOWN PROCESS ====================================
 
 def shutdown_process(process, timeout=1):
@@ -87,6 +90,7 @@ def shutdown_process(process, timeout=1):
         if process.is_alive():
             print(f"The process {process} is still alive after terminate, killing it!")
             process.kill()  # last resort
+    logging.info(f"The process {process} has been stopped")
     print(f"The process {process} stopped")
 
 # ===================================== PROCESS MANAGEMENT ==================================
@@ -118,7 +122,6 @@ queueList = {
     "Config": Queue(),
     "Log": Queue(),
 }
-logging = logging.getLogger()
 
 original_stdout = sys.stdout
 original_stderr = sys.stderr
@@ -147,8 +150,8 @@ camera_ready = Event()
 processCamera = processCamera(queueList, logging, camera_ready, debugging = False)
 
 # Initializing perception processor
-perception_ready = Event()
-processPerception = processPerception(queueList, logging, perception_ready, debugging = False)
+# perception_ready = Event()
+# processPerception = processPerception(queueList, logging, perception_ready, debugging = False)
 
 # Initializing semaphores
 semaphore_ready = Event()
@@ -167,8 +170,10 @@ sensor_ready = Event()
 processSensor = processSensor(queueList, logging, sensor_ready, debugging = False)
 
 # Adding all processes to the list
-allProcesses.extend([processCamera, processPerception, processSemaphore, processTrafficCom, processSerialHandler, processDashboard, processSensor])
-allEvents.extend([camera_ready, perception_ready, semaphore_ready, traffic_com_ready, serial_handler_ready, dashboard_ready, sensor_ready])
+# allProcesses.extend([processCamera, processPerception, processSemaphore, processTrafficCom, processSerialHandler, processDashboard, processSensor])
+# allEvents.extend([camera_ready, perception_ready, semaphore_ready, traffic_com_ready, serial_handler_ready, dashboard_ready, sensor_ready])
+allProcesses.extend([processCamera, processSemaphore, processTrafficCom, processSerialHandler, processDashboard, processSensor])
+allEvents.extend([camera_ready, semaphore_ready, traffic_com_ready, serial_handler_ready, dashboard_ready, sensor_ready])
 
 # ------ New component initialize starts here ------#
 
