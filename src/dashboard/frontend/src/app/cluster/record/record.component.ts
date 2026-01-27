@@ -26,38 +26,43 @@
 // OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-import { WebSocketService } from './../../webSocket/web-socket.service';
-import { Component } from '@angular/core';
-import { CommonModule } from '@angular/common'
+import { WebSocketService } from "./../../webSocket/web-socket.service";
+import { Component } from "@angular/core";
+import { CommonModule } from "@angular/common";
 
 @Component({
-  selector: 'app-record',
+  selector: "app-record",
   standalone: true,
   imports: [CommonModule],
-  templateUrl: './record.component.html',
-  styleUrl: './record.component.css'
+  templateUrl: "./record.component.html",
+  styleUrl: "./record.component.css",
 })
 export class RecordComponent {
-  recording: boolean = false;
-  text: string = "start record"
+  isRecording = false;
+  downloadUrl: string | null = null;
 
-  constructor( private webSocketService: WebSocketService) { }
+  constructor(private webSocketService: WebSocketService) {}
 
-  changeState() {
-    if (this.recording == false) {
-      this.recording = true;
-      this.text = "stop record"
-    }
-    else {
-      this.recording = false;
-      this.text = "start record"
-    }
+  startRecord() {
+    this.webSocketService.sendMessageToFlask(
+      JSON.stringify({ Name: "DataCollection", Action: "start" }),
+    );
+    this.isRecording = true;
+    this.downloadUrl = null;
+  }
 
-    this.webSocketService.sendMessageToFlask(`{"Name": "Record", "Value": "${this.recording}"}`);
+  stopRecord() {
+    this.webSocketService.sendMessageToFlask(
+      JSON.stringify({ Name: "DataCollection", Action: "stop" }),
+    );
+    this.isRecording = false;
+    setTimeout(() => {
+      this.downloadUrl = "/api/data-collection/latest";
+    }, 2000); // Đợi backend đóng gói zip
   }
 
   getButtonColor() {
-    if (this.recording === true) { 
+    if (this.isRecording === true) {
       return "#5cb85c";
     }
 
