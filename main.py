@@ -63,7 +63,7 @@ from src.hardware.camera.processCamera import processCamera
 from src.hardware.serialhandler.processSerialHandler import processSerialHandler
 from src.data.Semaphores.processSemaphores import processSemaphores
 from src.data.TrafficCommunication.processTrafficCommunication import processTrafficCommunication
-from src.data.processDataCollector import processDataCollector
+from src.collect_data.processDataCollector import processDataCollector
 from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
 from src.utils.messages.allMessages import StateChange
 from src.statemachine.stateMachine import StateMachine
@@ -147,8 +147,8 @@ camera_ready = Event()
 processCamera = processCamera(queueList, logging, camera_ready, debugging = False)
 
 # Initializing perception processor
-perception_ready = Event()
-processPerception = processPerception(queueList, logging, perception_ready, debugging = False)
+# perception_ready = Event()
+# processPerception = processPerception(queueList, logging, perception_ready, debugging = False)
 
 # Initializing semaphores
 semaphore_ready = Event()
