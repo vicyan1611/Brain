@@ -308,6 +308,59 @@ class LaneWorker(BasePerceptionWorker):
                 self.logger.debug("LaneWorker error: %s", e)
 
 
+
+class HardcodedWorker(BasePerceptionWorker):
+    """
+    Hardcoded sequence for demo/testing.
+    Sequence:
+    - 0-5s: Straight (0 deg), Speed 30 cm/s
+    - 5-6s: Turn 13 deg, Speed 30 cm/s
+    - 6-8s: Turn 15 deg, Speed 30 cm/s
+    - >8s: Stop
+    """
+    def __init__(self, frame_queue, queuesList, logger=None, pause=0.1):
+        super(HardcodedWorker, self).__init__(frame_queue, queuesList, logger, pause)
+        self.steer_sender = messageHandlerSender(queuesList, SteerMotor)
+        self.speed_sender = messageHandlerSender(queuesList, SpeedMotor)
+        self.start_time = None
+
+    def thread_work(self):
+        if self.start_time is None:
+            self.start_time = time.time()
+            if self.logger:
+                self.logger.info("HardcodedWorker started sequence at %f", self.start_time)
+
+        elapsed = time.time() - self.start_time
+        
+        target_speed = 0
+        target_steer = 0
+
+        # Sequence Logic
+        if elapsed < 5.0:
+            # 0-5s: Straight, Speed 30
+            target_speed = 300 # 30 cm/s * 10
+            target_steer = 0
+        elif elapsed < 6.0:
+            # 5-6s: Turn 13 deg
+            target_speed = 300
+            target_steer = 130 # 13 deg * 10
+        elif elapsed < 8.0:
+            # 6-8s: Turn 15 deg
+            target_speed = 300
+            target_steer = 150 # 15 deg * 10
+        else:
+            # >8s: Stop
+            target_speed = 0
+            target_steer = 0
+        
+        # Send
+        self.speed_sender.send(str(int(target_speed)))
+        self.steer_sender.send(str(int(target_steer)))
+
+        if self.logger:
+             self.logger.info("Hardcoded: T=%.1f | Speed=%s Steer=%s", elapsed, target_speed, target_steer)
+
+
 class processPerception(WorkerProcess):
     """Perception process that starts a frame reader and multiple worker threads.
 
@@ -368,7 +421,8 @@ class processPerception(WorkerProcess):
         #     )
         # )
         
-        self.threads.append(LaneWorker(self._frame_queue, self.queuesList, self.logging))
+        # self.threads.append(LaneWorker(self._frame_queue, self.queuesList, self.logging))
+        self.threads.append(HardcodedWorker(self._frame_queue, self.queuesList, self.logging))
 
         # Add more workers here as needed
 
