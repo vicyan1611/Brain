@@ -289,13 +289,12 @@ class LaneWorker(BasePerceptionWorker):
             steer_deg, target_speed = self.controller.get_control(offset, heading)
             
             # 3. Actuation: Gửi tín hiệu
-            # Gửi góc lái (float string)
-            self.steer_sender.send(str(float(steer_deg)))
+            steer_final = float(np.clip(steer_deg, -25, 25))
+            self.steer_sender.send(int(steer_final))
 
-            # Gửi tốc độ (int string)
-            # Lưu ý: Cần cơ chế priority để không ghi đè lệnh dừng của ObstacleWorker
-            # (Thường thì ObstacleWorker gửi tốc độ 0 sẽ ghi đè cái này nếu kiến trúc message handler tốt)
-            self.speed_sender.send(str(int(target_speed)))
+            speed_scaled = target_speed * 10
+            speed_final = float(np.clip(speed_scaled, -500, 500))
+            self.speed_sender.send(int(speed_final))
 
             # Debug log
             if self.logger:
