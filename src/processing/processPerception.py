@@ -299,14 +299,14 @@ class LaneWorker(BasePerceptionWorker):
 
             # Debug log
             if self.logger:
-                self.logger.debug(
+                self.logger.info(
                     "Lane: Off=%.2f Head=%.2f | Steer=%.1f Speed=%d", 
                     offset, np.rad2deg(heading), steer_deg, int(target_speed)
                 )
 
         except Exception as e:
             if self.logger:
-                self.logger.debug("LaneWorker error: %s", e)
+                self.logger.info("LaneWorker error: %s", e)
 
 
 class processPerception(WorkerProcess):
