@@ -360,7 +360,6 @@ class processPerception(WorkerProcess):
         self.model = None
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
-
     def _init_model(self):
         self.model_path = 'models/yolov8n.pt'
         self.model = ultralytics.YOLO(self.model_path)
