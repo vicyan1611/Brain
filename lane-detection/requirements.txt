@@ -5,3 +5,4 @@ pandas
 moviepy==1.0.3
 scikit-learn
 moviepy
+scipy

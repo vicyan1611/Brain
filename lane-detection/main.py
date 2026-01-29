@@ -314,7 +314,7 @@ def frame_processor(image):
 
 # --- CHẠY ---
 if __name__ == "__main__":
-    input_path = 'input.mp4'
+    input_path = 'lane-detection/input.mp4'
     output_path = 'output_PID_Control.mp4'
     
     print("Đang xử lý video...")

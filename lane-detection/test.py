@@ -118,8 +118,6 @@ def get_curve_points(imgWarp):
 
     ploty = np.linspace(y_top, y_bottom, y_bottom - y_top + 1)
 
-
-
     # -------------------------
     # 6) Sanity check (Kiểm tra bám biên)
     # -------------------------
@@ -164,6 +162,7 @@ def get_curve_points(imgWarp):
 
     return np.clip(left_fitx, 0, w-1), np.clip(right_fitx, 0, w-1), ploty
 
+
 def draw_green_lane(img_original, img_warp, points):
     """ Vẽ vùng xanh lên ảnh """
     left_fitx, right_fitx, ploty = get_curve_points(img_warp)
@@ -189,6 +188,7 @@ def draw_green_lane(img_original, img_warp, points):
     
     # Gộp 2 ảnh
     result = cv2.addWeighted(img_original, 1, newwarp, 0.5, 0)
+
     return result
 
 def frame_processor(image):
@@ -222,6 +222,7 @@ def frame_processor(image):
 
     # 7. Trả về ảnh 480x240 (RGB)
     return cv2.cvtColor(final_img, cv2.COLOR_BGR2RGB)
+
 
 # --- CHẠY ---
 input_path = 'input.mp4'
