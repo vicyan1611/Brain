@@ -25,8 +25,8 @@ class DistanceReader(ThreadWithStop):
 		# Initialize the hardware sensor only if available
 		if DistanceSensor is None:
 			raise RuntimeError("gpiozero not available; run on Raspberry Pi or install gpiozero")
-		# BCM pins: echo=23, trigger=24 by default (as provided by the user)
 		self.sensor = DistanceSensor(echo=ECHO, trigger=TRIGGER, max_distance=max_distance)
+		self.logger.info("DistanceReader initialized with max_distance=%.2f m", max_distance)
 
 	def thread_work(self):
 		try:
@@ -38,7 +38,7 @@ class DistanceReader(ThreadWithStop):
 			self.sender.send(distance_cm)
 
 			if self.logger:
-				self.logger.debug("DistanceReader: %.2f cm", distance_cm)
+				self.logger.info("DistanceReader: %.2f cm", distance_cm)
 		except Exception as e:
 			if self.logger:
 				self.logger.error("DistanceReader error: %s", e)
