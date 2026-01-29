@@ -1,4 +1,5 @@
 import os
+import csv
 import threading
 from src.templates.workerprocess import WorkerProcess
 from src.templates.threadwithstop import ThreadWithStop
@@ -276,6 +277,20 @@ class LaneWorker(BasePerceptionWorker):
         self.estimator = LaneCurveEstimator()
         self.controller = AdaptiveController() 
 
+        self.log_dir = "logs"
+        os.makedirs(self.log_dir, exist_ok=True)
+
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        self.log_file = os.path.join(self.log_dir, f"run_log_{ts}.csv")
+        
+        # Mở file và ghi header
+        self.csv_file = open(self.log_file, mode='w', newline='')
+        self.csv_writer = csv.writer(self.csv_file)
+        self.csv_writer.writerow(["Timestamp", "Offset_m", "Heading_deg", "Steer_deg", "Speed_PWM", "Raw_Speed"])
+        
+        if self.logger:
+            self.logger.info(f"LaneWorker logging to: {self.log_file}")
+
     def thread_work(self):
         try:
             frame = self.q.get(timeout=0.5)
@@ -297,6 +312,18 @@ class LaneWorker(BasePerceptionWorker):
             speed_final = float(np.clip(speed_scaled, -500, 500))
             self.speed_sender.send(int(speed_final))
 
+            # Ghi dữ liệu vào CSV
+            self.csv_writer.writerow([
+                time.time(),                # Timestamp
+                f"{offset:.4f}",            # Offset (m)
+                f"{np.rad2deg(heading):.2f}", # Heading (độ)
+                int(steer_final),                # Góc lái thực tế gửi đi
+                int(speed_final),                # Tốc độ thực tế gửi đi
+                f"{target_speed:.1f}"       # Tốc độ gốc từ controller
+            ])
+            # Flush để đảm bảo dữ liệu được ghi ngay lập tức (phòng khi crash)
+            self.csv_file.flush()
+
             # Debug log
             if self.logger:
                 self.logger.info(
@@ -307,6 +334,11 @@ class LaneWorker(BasePerceptionWorker):
         except Exception as e:
             if self.logger:
                 self.logger.info("LaneWorker error: %s", e)
+    
+    def stop(self):
+        if hasattr(self, 'csv_file') and self.csv_file:
+            self.csv_file.close()
+        super(LaneWorker, self).stop()
 
 
 class processPerception(WorkerProcess):
