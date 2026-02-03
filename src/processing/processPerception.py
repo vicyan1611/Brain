@@ -304,7 +304,7 @@ class LaneWorker(BasePerceptionWorker):
             steer_deg, target_speed = self.controller.get_control(offset, heading)
             
             # 3. Actuation: Gửi tín hiệu
-            steer_scaled = target_speed * 10
+            steer_scaled = steer_deg * 10
             steer_final = float(np.clip(steer_scaled, -250, 250))
             self.steer_sender.send(int(steer_final))
 
