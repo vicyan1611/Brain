@@ -145,51 +145,108 @@ class BasePerceptionWorker(ThreadWithStop):
 
 
 class ObstacleWorker(BasePerceptionWorker):
-    """Detect obstacles using simple edge-density on center crop."""
+    """Detect obstacles using distance-based speed reduction."""
 
     def __init__(self, frame_queue, queuesList, logger=None, pause=0.01):
         super(ObstacleWorker, self).__init__(frame_queue, queuesList, logger, pause)
         self.speed_sender = messageHandlerSender(queuesList, SpeedMotor)
         self.warn_sender = messageHandlerSender(queuesList, WarningSignal)
-        self.brake_sender = messageHandlerSender(self.queuesList, Brake)   # optional
-        self._last_stop_time = 0
+        self.brake_sender = messageHandlerSender(self.queuesList, Brake)
+        self.distance_sub = messageHandlerSubscriber(queuesList, DistanceReading, "lastOnly", True)
+        
+        # Distance-based speed control parameters
+        self._safe_distance_cm = 100.0      # No speed reduction above this
+        self._warning_distance_cm = 50.0    # Start aggressive reduction
+        self._critical_distance_cm = 20.0   # Complete stop
+        self._last_warn_time = 0
 
     def thread_work(self):
-        try:
-            frame = self.q.get(timeout=0.5)
-        except Empty:
-            return
+        # Check distance sensor and adjust speed smoothly
+        latest_distance = self.distance_sub.receive()
+        if latest_distance is not None:
+            speed_factor = self._calculate_speed_factor(latest_distance)
+            
+            # Send speed reduction command
+            try:
+                # Assuming base speed is controlled by LaneWorker, we send a reduction factor
+                # If distance requires stopping, send "0"
+                if speed_factor <= 0:
+                    self.speed_sender.send("0")
+                    self.brake_sender.send("0")
+                    if self.logger:
+                        self.logger.warning("ObstacleWorker: CRITICAL distance %.2f cm - STOPPING", latest_distance)
+                else:
+                    # For proportional control, we could send scaled speed
+                    # But since LaneWorker controls speed, we'll only intervene when needed
+                    pass
+            except Exception as e:
+                if self.logger:
+                    self.logger.debug("ObstacleWorker send error: %s", e)
+            
+            # Send warning at appropriate intervals
+            now = time.time()
+            if latest_distance < self._warning_distance_cm and (now - self._last_warn_time) > 2.0:
+                self._last_warn_time = now
+                try:
+                    self.warn_sender.send(f"distance:{latest_distance:.2f}cm,factor:{speed_factor:.2f}")
+                except Exception:
+                    pass
+                if self.logger:
+                    self.logger.info("ObstacleWorker: Distance %.2f cm, speed_factor=%.2f", latest_distance, speed_factor)
+    
+    def _calculate_speed_factor(self, distance_cm):
+        """
+        Calculate speed reduction factor based on distance.
+        Returns: 1.0 (full speed) to 0.0 (stop)
+        """
+        if distance_cm >= self._safe_distance_cm:
+            return 1.0  # Full speed
+        elif distance_cm <= self._critical_distance_cm:
+            return 0.0  # Stop
+        elif distance_cm <= self._warning_distance_cm:
+            # Aggressive linear reduction from warning to critical
+            return (distance_cm - self._critical_distance_cm) / (self._warning_distance_cm - self._critical_distance_cm) * 0.5
+        else:
+            # Gentle linear reduction from safe to warning
+            factor = (distance_cm - self._warning_distance_cm) / (self._safe_distance_cm - self._warning_distance_cm)
+            return 0.5 + factor * 0.5  # Range: 0.5 to 1.0
+        
 
-        try:
-            h, w = frame.shape[:2]
-            cx1 = int(w * 0.3)
-            cy1 = int(h * 0.3)
-            cx2 = int(w * 0.7)
-            cy2 = int(h * 0.7)
-            crop = frame[cy1:cy2, cx1:cx2]
-            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-            edges = cv2.Canny(gray, 50, 150)
-            edge_density = float(edges.mean() / 255.0)
-            if self.logger:
-                self.logger.info("Perception obstacle edge_density=%.4f", edge_density)
+        # try:
+        #     frame = self.q.get(timeout=0.5)
+        # except Empty:
+        #     return
 
-            # threshold and simple rate-limit
-            if edge_density > 0.06:
-                now = time.time()
-                if now - self._last_stop_time > 1.0:
-                    self._last_stop_time = now
-                    try:
-                        self.speed_sender.send("0")
-                        self.brake_sender.send("0")
-                    except Exception:
-                        pass
-                    try:
-                        self.warn_sender.send(f"obstacle:{edge_density:.4f}")
-                    except Exception:
-                        pass
-        except Exception as e:
-            if self.logger:
-                self.logger.debug("ObstacleWorker error: %s", e)
+        # try:
+        #     h, w = frame.shape[:2]
+        #     cx1 = int(w * 0.3)
+        #     cy1 = int(h * 0.3)
+        #     cx2 = int(w * 0.7)
+        #     cy2 = int(h * 0.7)
+        #     crop = frame[cy1:cy2, cx1:cx2]
+        #     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        #     edges = cv2.Canny(gray, 50, 150)
+        #     edge_density = float(edges.mean() / 255.0)
+        #     if self.logger:
+        #         self.logger.info("Perception obstacle edge_density=%.4f", edge_density)
+
+        #     # threshold and simple rate-limit
+        #     if edge_density > 0.06:
+        #         now = time.time()
+        #         if now - self._last_stop_time > 1.0:
+        #             self._last_stop_time = now
+        #             try:
+        #                 self.speed_sender.send("0")
+        #                 self.brake_sender.send("0")
+        #             except Exception:
+        #                 pass
+        #             try:
+        #                 self.warn_sender.send(f"obstacle:{edge_density:.4f}")
+        #             except Exception:
+        #                 pass
+        # except Exception as e:
+        #     if self.logger:
+        #         self.logger.debug("ObstacleWorker error: %s", e)
 
 class ObstacleWorkerYOLO(BasePerceptionWorker):
     """Detect obstacles using YOLOv8 model."""
@@ -354,7 +411,7 @@ class processPerception(WorkerProcess):
         )
 
         # Worker threads (easy to extend)
-        # self.threads.append(ObstacleWorker(self._frame_queue, self.queuesList, self.logging))
+        self.threads.append(ObstacleWorker(self._frame_queue, self.queuesList, self.logging))
 
         # self.threads.append(
         #     ObstacleWorkerYOLO(
