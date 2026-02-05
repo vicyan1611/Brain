@@ -26,15 +26,20 @@
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
 
-if __name__ == "__main__":
-    import sys
-    sys.path.insert(0, "../../..")
-
+import os
+import sys
 import re
 import serial
 import serial.tools.list_ports
 import threading
 from threading import Lock
+from multiprocessing import Queue, Event
+
+# Ensure project root is on sys.path for imports when executed from different cwd
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "../../.."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 from src.templates.workerprocess import WorkerProcess
 from src.hardware.serialhandler.threads.filehandler import FileHandler
@@ -255,7 +260,8 @@ if __name__ == "__main__":
     }
     logger = logging.getLogger()
     pipeRecv, pipeSend = Pipe(duplex=False)
-    process = processSerialHandler(queueList, logger, debugg, True)
+    dashboard_ready = Event()
+    process = processSerialHandler(queueList=queueList, logging=logger, dashboard_ready=dashboard_ready, debugging=debugg, example=True)
     process.daemon = True
     process.start()
     time.sleep(4)  # modify the value to increase/decrease the time of the example

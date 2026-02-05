@@ -1,3 +1,6 @@
+import os
+import csv
+import threading
 from src.templates.workerprocess import WorkerProcess
 from src.templates.threadwithstop import ThreadWithStop
 from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
@@ -8,27 +11,110 @@ from src.utils.messages.allMessages import (
     SteerMotor,
     WarningSignal,
     LaneKeeping,
+    Brake,
+    DistanceReading,
 )
+from src.processing.lane_detection import LaneCurveEstimator
 
 import base64
 import numpy as np
 import cv2
 import time
 from queue import Queue, Full, Empty
+import torch
+import ultralytics
+from scipy.interpolate import CubicSpline
 
+class AdaptiveController:
+    """
+    Điều khiển thích nghi dùng Cubic Spline.
+    Input: Offset, Heading.
+    Output: Steering Angle (deg), Speed (unit).
+    """
+    def __init__(self):
+        # Cấu hình
+        self.max_speed = 50     # Chạy thẳng
+        self.min_speed = 20     # Vào cua
+        
+        self.alpha_straight = np.deg2rad(2)   # Ngưỡng đường thẳng (rad)
+        self.alpha_curve = np.deg2rad(15)     # Ngưỡng cua gắt (rad)
+
+        self.Kp_straight = 0.6
+        self.Kp_curve = 1.5
+
+        # Cubic Spline Interpolation
+        self.speed_spline = CubicSpline(
+            [self.alpha_straight, self.alpha_curve], 
+            [self.max_speed, self.min_speed],
+            bc_type=((1, 0.0), (1, 0.0))
+        )
+        
+        self.gain_spline = CubicSpline(
+            [self.alpha_straight, self.alpha_curve],
+            [self.Kp_straight, self.Kp_curve],
+            bc_type=((1, 0.0), (1, 0.0))
+        )
+
+    def get_control(self, offset, heading_error):
+        abs_alpha = abs(heading_error)
+
+        # 1. Tính toán Speed & Gain
+        if abs_alpha <= self.alpha_straight:
+            target_speed = self.max_speed
+            kp = self.Kp_straight
+        elif abs_alpha >= self.alpha_curve:
+            target_speed = self.min_speed
+            kp = self.Kp_curve
+        else:
+            target_speed = float(self.speed_spline(abs_alpha))
+            kp = float(self.gain_spline(abs_alpha))
+
+        # 2. Tính Steering (Stanley-like PD)
+        # steering = -Kp * offset - Kd * heading
+        steering_angle_rad = -kp * offset - 0.8 * heading_error
+        
+        # Đổi ra độ và giới hạn
+        steering_angle_deg = np.rad2deg(steering_angle_rad)
+        steering_angle_deg = np.clip(steering_angle_deg, -25, 25)
+
+        return steering_angle_deg, target_speed
 
 class FrameReader(ThreadWithStop):
     """Reads frames from `serialCamera` messages and pushes decoded frames into a local queue."""
 
-    def __init__(self, queuesList, frame_queue, logger=None, pause=0.01):
+    def __init__(self, queuesList, frame_queue, logger=None, pause=0.01, distance_threshold_cm=150.0, log_interval_sec=1.0):
         super(FrameReader, self).__init__(pause=pause)
         self.sub = messageHandlerSubscriber(queuesList, serialCamera, "lastOnly", True)
+        self.distance_sub = messageHandlerSubscriber(queuesList, DistanceReading, "lastOnly", True)
         self.q = frame_queue
         self.logger = logger
+        self.distance_threshold_cm = distance_threshold_cm
+        self.log_interval_sec = log_interval_sec
+        self._last_distance_cm = None
+        self._last_log_ts = 0.0
 
     def thread_work(self):
+        # Update latest distance if a reading is available
+        latest_distance = self.distance_sub.receive()
+        if latest_distance is not None:
+            self._last_distance_cm = latest_distance
+            now = time.time()
+            if self.logger and (now - self._last_log_ts) >= self.log_interval_sec:
+                within_gate = self._last_distance_cm <= self.distance_threshold_cm
+                self.logger.info(
+                    "DistanceReader: %.2f cm (gate=%s, thr=%.0f)",
+                    self._last_distance_cm,
+                    within_gate,
+                    self.distance_threshold_cm,
+                )
+                self._last_log_ts = now
+
         msg = self.sub.receive()
         if msg is None:
+            return
+
+        # Drop frames if we are too far from the target
+        if self._last_distance_cm is not None and self._last_distance_cm > self.distance_threshold_cm:
             return
         try:
             # expect base64-encoded jpeg string
@@ -62,12 +148,124 @@ class BasePerceptionWorker(ThreadWithStop):
 
 
 class ObstacleWorker(BasePerceptionWorker):
-    """Detect obstacles using simple edge-density on center crop."""
+    """Detect obstacles using distance-based speed reduction."""
 
     def __init__(self, frame_queue, queuesList, logger=None, pause=0.01):
         super(ObstacleWorker, self).__init__(frame_queue, queuesList, logger, pause)
         self.speed_sender = messageHandlerSender(queuesList, SpeedMotor)
         self.warn_sender = messageHandlerSender(queuesList, WarningSignal)
+        self.brake_sender = messageHandlerSender(self.queuesList, Brake)
+        self.distance_sub = messageHandlerSubscriber(queuesList, DistanceReading, "lastOnly", True)
+        
+        # Distance-based speed control parameters
+        self._safe_distance_cm = 100.0      # No speed reduction above this
+        self._warning_distance_cm = 50.0    # Start aggressive reduction
+        self._critical_distance_cm = 20.0   # Complete stop
+        self._last_warn_time = 0
+
+    def thread_work(self):
+        # Check distance sensor and adjust speed smoothly
+        latest_distance = self.distance_sub.receive()
+        if latest_distance is not None:
+            speed_factor = self._calculate_speed_factor(latest_distance)
+            
+            # Send speed reduction command
+            try:
+                # Assuming base speed is controlled by LaneWorker, we send a reduction factor
+                # If distance requires stopping, send "0"
+                if speed_factor <= 0:
+                    self.speed_sender.send("0")
+                    self.brake_sender.send("0")
+                    if self.logger:
+                        self.logger.warning("ObstacleWorker: CRITICAL distance %.2f cm - STOPPING", latest_distance)
+                else:
+                    # For proportional control, we could send scaled speed
+                    # But since LaneWorker controls speed, we'll only intervene when needed
+                    pass
+            except Exception as e:
+                if self.logger:
+                    self.logger.debug("ObstacleWorker send error: %s", e)
+            
+            # Send warning at appropriate intervals
+            now = time.time()
+            if latest_distance < self._warning_distance_cm and (now - self._last_warn_time) > 2.0:
+                self._last_warn_time = now
+                try:
+                    self.warn_sender.send(f"distance:{latest_distance:.2f}cm,factor:{speed_factor:.2f}")
+                except Exception:
+                    pass
+                if self.logger:
+                    self.logger.info("ObstacleWorker: Distance %.2f cm, speed_factor=%.2f", latest_distance, speed_factor)
+    
+    def _calculate_speed_factor(self, distance_cm):
+        """
+        Calculate speed reduction factor based on distance.
+        Returns: 1.0 (full speed) to 0.0 (stop)
+        """
+        if distance_cm >= self._safe_distance_cm:
+            return 1.0  # Full speed
+        elif distance_cm <= self._critical_distance_cm:
+            return 0.0  # Stop
+        elif distance_cm <= self._warning_distance_cm:
+            # Aggressive linear reduction from warning to critical
+            return (distance_cm - self._critical_distance_cm) / (self._warning_distance_cm - self._critical_distance_cm) * 0.5
+        else:
+            # Gentle linear reduction from safe to warning
+            factor = (distance_cm - self._warning_distance_cm) / (self._safe_distance_cm - self._warning_distance_cm)
+            return 0.5 + factor * 0.5  # Range: 0.5 to 1.0
+        
+
+        # try:
+        #     frame = self.q.get(timeout=0.5)
+        # except Empty:
+        #     return
+
+        # try:
+        #     h, w = frame.shape[:2]
+        #     cx1 = int(w * 0.3)
+        #     cy1 = int(h * 0.3)
+        #     cx2 = int(w * 0.7)
+        #     cy2 = int(h * 0.7)
+        #     crop = frame[cy1:cy2, cx1:cx2]
+        #     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        #     edges = cv2.Canny(gray, 50, 150)
+        #     edge_density = float(edges.mean() / 255.0)
+        #     if self.logger:
+        #         self.logger.info("Perception obstacle edge_density=%.4f", edge_density)
+
+        #     # threshold and simple rate-limit
+        #     if edge_density > 0.06:
+        #         now = time.time()
+        #         if now - self._last_stop_time > 1.0:
+        #             self._last_stop_time = now
+        #             try:
+        #                 self.speed_sender.send("0")
+        #                 self.brake_sender.send("0")
+        #             except Exception:
+        #                 pass
+        #             try:
+        #                 self.warn_sender.send(f"obstacle:{edge_density:.4f}")
+        #             except Exception:
+        #                 pass
+        # except Exception as e:
+        #     if self.logger:
+        #         self.logger.debug("ObstacleWorker error: %s", e)
+
+class ObstacleWorkerYOLO(BasePerceptionWorker):
+    """Detect obstacles using YOLOv8 model."""
+    def __init__(self, frame_queue, queuesList, logger=None, pause=0.01,
+                yolo_model=None, device="cpu", lock=None, score_thr=0.35, save_dir=None):
+        
+        super(ObstacleWorkerYOLO, self).__init__(frame_queue, queuesList, logger, pause)
+        self.speed_sender = messageHandlerSender(queuesList, SpeedMotor)
+        self.warn_sender = messageHandlerSender(queuesList, WarningSignal)
+        self.brake_sender = messageHandlerSender(self.queuesList, Brake)
+        self.model = yolo_model
+        self.device = device
+        self.lock = lock or threading.Lock()
+        self.score_thr = score_thr
+        self.save_dir = save_dir
+        self._frame_idx = 0
         self._last_stop_time = 0
 
         self._obs_count = 0
@@ -136,252 +334,131 @@ class ObstacleWorker(BasePerceptionWorker):
         except Empty:
             return
 
-        # Guard an toàn
-        if frame is None or getattr(frame, "size", 0) == 0:
-            return
-
         try:
-            # === GỌI HÀM detect_obstacle MỚI (CÓ self) ===
-            is_obstacle, score, debug = self.detect_obstacle(
-                frame,
-                roi_y_start=0.25,          # nhìn phía trước xe (phần dưới ảnh)
-                roi_x_left=0.2,
-                roi_x_right=0.8,
-                blur_ksize=5,
-                canny1=60,
-                canny2=160,
-                edge_ratio_threshold=0.06,
-                min_contour_area=800
-            )
+            with torch.inference_mode():
+                # lock to avoid concurrent model() calls from multiple threads
+                with self.lock:
+                    results = self.model(frame, verbose=False, device=self.device)[0]
+                    self.logger.debug("ObstacleWorkerYOLO: %d boxes detected", len(results.boxes))
 
-            if self.logger:
-                self.logger.info(
-                    "Obstacle detect | is=%s | score=%.4f | edge=%.4f | area=%.1f",
-                    is_obstacle,
-                    score,
-                    float(debug.get("edge_ratio", 0.0)),
-                    float(debug.get("max_contour_area", 0.0)),
-                )
+            for box in results.boxes:
+                conf = float(box.conf)
+                if conf < self.score_thr:
+                    continue
+                cls_id = int(box.cls)
+                xyxy = box.xyxy[0].tolist()
 
-            # === DEBOUNCE: phải gặp liên tiếp N frame ===
-            if is_obstacle:
-                self._obs_count += 1
-            else:
-                self._obs_count = 0
+                # ----- Handle detected obstacle -----
+                if self.save_dir:
+                    self._frame_idx += 1
+                    vis = frame.copy()
+                    x1, y1, x2, y2 = map(int, xyxy)
+                    cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.putText(vis, f"{cls_id}:{conf:.2f}", (x1, y1 - 5),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                    out_path = os.path.join(self.save_dir, f"frame_{self._frame_idx:06d}.jpg")
+                    cv2.imwrite(out_path, vis)                    
+                # ----- Finish handling obstacle -----
 
-            if self._obs_count >= self._require_consecutive:
-                now = time.time()
-
-                # === RATE LIMIT: tránh spam stop ===
-                if now - self._last_stop_time > 1.0:
-                    self._last_stop_time = now
-
-                    # === STOP XE ===
-                    try:
-                        self.speed_sender.send("0")
-                    except Exception:
-                        pass
-
-                    # === CẢNH BÁO ===
-                    try:
-                        self.warn_sender.send(
-                            f"obstacle score={score:.4f} "
-                            f"edge={debug.get('edge_ratio', 0.0):.4f} "
-                            f"area={debug.get('max_contour_area', 0.0):.1f}"
-                        )
-                    except Exception:
-                        pass
-
+                # # simple action: stop and warn once per second
+                # now = time.time()
+                # if now - self._last_stop_time > 1.0:
+                #     self._last_stop_time = now
+                #     try:
+                #         self.speed_sender.send("0")
+                #         self.brake_sender.send("0")
+                #     except Exception:
+                #         pass
+                #     try:
+                #         self.warn_sender.send(f"yolo:{cls_id}:{conf:.2f}")
+                #     except Exception:
+                #         pass
         except Exception as e:
             if self.logger:
-                self.logger.debug("ObstacleWorker error: %s", e)
+                self.logger.debug("ObstacleWorkerYOLO error: %s", e)
 
+        
 
 class LaneWorker(BasePerceptionWorker):
     """
-    Lane Detection using Histogram & Dynamic Thresholding (Ported from C++ Team Code).
+    Lane detection worker that uses Adaptive Controller.
+    Controls BOTH Steer and Speed based on road curvature.
     """
-
     def __init__(self, frame_queue, queuesList, logger=None, pause=0.02):
         super(LaneWorker, self).__init__(frame_queue, queuesList, logger, pause)
+        
+        # Senders
         self.steer_sender = messageHandlerSender(queuesList, SteerMotor)
+        self.speed_sender = messageHandlerSender(queuesList, SpeedMotor) 
         self.lane_sender = messageHandlerSender(queuesList, LaneKeeping)
-        self.speed_sender = messageHandlerSender(queuesList, SpeedMotor) # Cần để dừng khi gặp Stopline
+        
+        # Khởi tạo Logic
+        self.estimator = LaneCurveEstimator()
+        self.controller = AdaptiveController() 
 
-        # Tuning Parameters
-        self.kp = 0.15          # Hệ số đánh lái (Tune: 0.1 -> 0.5)
-        self.max_angle = 25     # Góc lái tối đa
-        self.prev_center = 320  # Giả sử tâm ảnh là 320 (với ảnh 640x480)
-        
-        # Logic stopline
-        self.stopline_detected = False
+        self.log_dir = "logs"
+        os.makedirs(self.log_dir, exist_ok=True)
 
-    def extract_lanes(self, hist_data):
-        """
-        Tìm các chỉ số cột (index) nơi bắt đầu hoặc kết thúc vạch kẻ đường.
-        Logic: Chuyển từ 0 lên cao (edge lên) hoặc từ cao xuống 0 (edge xuống).
-        """
-        lane_indices = []
-        previous_value = 0
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        self.log_file = os.path.join(self.log_dir, f"run_log_{ts}.csv")
         
-        # hist_data là mảng 1 chiều (640 phần tử)
-        for idx, value in enumerate(hist_data):
-            # Threshold 1500 tương đương khoảng 6 pixel trắng (255*6 ~ 1530)
-            if value >= 1500 and previous_value == 0:
-                lane_indices.append(idx)
-                previous_value = 255
-            elif value == 0 and previous_value == 255:
-                lane_indices.append(idx)
-                previous_value = 0
-                
-        # Nếu số lượng điểm lẻ, thêm điểm cuối cùng của ảnh vào
-        if len(lane_indices) % 2 == 1:
-            lane_indices.append(len(hist_data) - 1)
-            
-        return lane_indices
-
-    def process_histogram_algorithm(self, frame):
-        """
-        Logic chính port từ hàm optimized_histogram của C++
-        """
-        h, w = frame.shape[:2]
-        self.stopline_detected = False
+        # Mở file và ghi header
+        self.csv_file = open(self.log_file, mode='w', newline='')
+        self.csv_writer = csv.writer(self.csv_file)
+        self.csv_writer.writerow(["Timestamp", "Offset_m", "Heading_deg", "Steer_deg", "Speed_PWM", "Raw_Speed"])
         
-        # 1. Convert to Grayscale
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        
-        # 2. ROI Selection (Bottom part of image like C++ code: y=384, h=96)
-        # Lưu ý: C++ dùng cv::Rect(0, 384, 640, 96)
-        roi_y_start = 384
-        if roi_y_start >= h: roi_y_start = h - 100 # Fallback nếu ảnh nhỏ hơn
-        roi = gray[roi_y_start:h, 0:w]
-        
-        # 3. Dynamic Thresholding (Key Feature!)
-        minVal, maxVal, minLoc, maxLoc = cv2.minMaxLoc(roi)
-        
-        # Logic C++: double threshold_value = std::min(std::max(maxVal - 55.0, 30.0), 200.0);
-        threshold_value = max(maxVal - 55.0, 30.0)
-        threshold_value = min(threshold_value, 200.0)
-        
-        _, thresh = cv2.threshold(roi, threshold_value, 255, cv2.THRESH_BINARY)
-        
-        # 4. Histogram Calculation (Reduce sum columns)
-        # Axis 0 là cộng dồn theo cột dọc
-        hist = np.sum(thresh, axis=0) 
-        
-        # 5. Extract Lanes
-        lanes = self.extract_lanes(hist)
-        centers = []
-        
-        # Tính trung điểm từng cặp vạch (lanes[2*i] và lanes[2*i+1])
-        # lanes structure: [start_L, end_L, start_R, end_R, ...]
-        num_pairs = len(lanes) // 2
-        for i in range(num_pairs):
-            start = lanes[2 * i]
-            end = lanes[2 * i + 1]
-            width_lane = abs(start - end)
-            
-            # Logic C++ Stopline: abs(...) > 350 && thresh > 50
-            if width_lane > 350 and threshold_value > 50:
-                self.stopline_detected = True
-                return w / 2.0, threshold_value # Return center mặc định nếu gặp stopline
-            
-            # Logic lọc nhiễu: chỉ lấy vạch có độ rộng > 3 pixel
-            if width_lane > 3:
-                centers.append((start + end) / 2.0)
-
-        # 6. Calculate Final Center based on visible lanes
-        target_center = w / 2.0
-        
-        if not centers:
-            # Không thấy đường -> Giữ lái thẳng hoặc giá trị cũ
-            target_center = w / 2.0
-        elif len(centers) == 1:
-            # Chỉ thấy 1 vạch
-            c = centers[0]
-            if c > (w / 2.0):
-                # Thấy vạch phải -> xe đang lệch trái -> Tâm đường nằm bên trái vạch này
-                # Logic C++: (centers[0] - 0) / 2 ... Hơi lạ, logic này có thể làm xe bám sát lề
-                # Ta sẽ điều chỉnh logic này an toàn hơn: Giả sử đường rộng 300px
-                target_center = c - 150 
-            else:
-                # Thấy vạch trái
-                target_center = c + 150
-        elif abs(centers[0] - centers[-1]) < 200:
-             # Hai vạch quá gần nhau -> Có thể là nhiễu hoặc đường hẹp, lấy trung bình
-             avg = (centers[0] + centers[-1]) / 2.0
-             if avg > w: 
-                 target_center = w/2 # Fallback
-             else:
-                 target_center = (centers[0] + centers[-1] + w) / 2 if avg > w/2 else (centers[0] + centers[-1])/2
-                 # Đoạn logic C++ khúc này hơi rối rắm, ta đơn giản hóa:
-                 target_center = (centers[0] + centers[-1]) / 2.0
-        else:
-            # Trường hợp lý tưởng: Thấy vạch trái ngoài cùng và vạch phải ngoài cùng
-            target_center = (centers[0] + centers[-1]) / 2.0
-
-        return target_center, threshold_value
+        if self.logger:
+            self.logger.info(f"LaneWorker logging to: {self.log_file}")
 
     def thread_work(self):
         try:
             frame = self.q.get(timeout=0.5)
         except Empty:
             return
-
-        if frame is None or getattr(frame, "size", 0) == 0:
-            return
-
         try:
-            h, w = frame.shape[:2]
-            img_center_x = w // 2
+            # 1. Perception: Lấy thông số từ ảnh
+            offset, curvature, heading, _ = self.estimator.process(frame)
             
-            # === CHẠY THUẬT TOÁN HISTOGRAM ===
-            lane_center, thresh_val = self.process_histogram_algorithm(frame)
+            # 2. Control: Tính góc lái và tốc độ
+            steer_deg, target_speed = self.controller.get_control(offset, heading)
             
-            # === XỬ LÝ STOPLINE ===
-            if self.stopline_detected:
-                # Gửi lệnh dừng xe
-                try:
-                    self.speed_sender.send("0")
-                    self.lane_sender.send("STOPLINE DETECTED")
-                except: pass
-                # Reset steering về 0
-                steering_angle = 0
-            else:
-                # === TÍNH GÓC LÁI (PID P-Controller) ===
-                # Error = Tâm đường mong muốn - Tâm xe (giữa ảnh)
-                error = lane_center - img_center_x
-                
-                # C++ Logic có đoạn previous_center smoothing, ta áp dụng nhẹ
-                # Low-pass filter để góc lái mượt hơn
-                lane_center = 0.7 * lane_center + 0.3 * self.prev_center
-                self.prev_center = lane_center
-                
-                # Tính lại error sau khi smooth
-                error = lane_center - img_center_x
-                
-                steering_angle = int(error * self.kp)
-                
-                # Clamp góc lái
-                steering_angle = max(-self.max_angle, min(self.max_angle, steering_angle))
-                
-                # Gửi tín hiệu lái
-                try:
-                    self.steer_sender.send(str(steering_angle))
-                except Exception:
-                    pass
+            # 3. Actuation: Gửi tín hiệu
+            steer_scaled = steer_deg * 10
+            steer_final = float(np.clip(steer_scaled, -100, 100))
+            self.steer_sender.send(int(steer_final))
 
-            # === DEBUG INFO ===
-            try:
-                msg = (f"Steer:{steering_angle} | Center:{int(lane_center)} | "
-                       f"Thresh:{int(thresh_val)} | Stop:{self.stopline_detected}")
-                self.lane_sender.send(msg)
-            except Exception:
-                pass
+            speed_scaled = target_speed * 10
+            speed_final = float(np.clip(speed_scaled, -300, 300))
+            self.speed_sender.send(int(speed_final))
+
+            # Ghi dữ liệu vào CSV
+            self.csv_writer.writerow([
+                time.time(),                # Timestamp
+                f"{offset:.4f}",            # Offset (m)
+                f"{np.rad2deg(heading):.2f}", # Heading (độ)
+                int(steer_final),                # Góc lái thực tế gửi đi
+                int(speed_final),                # Tốc độ thực tế gửi đi
+                f"{target_speed:.1f}"       # Tốc độ gốc từ controller
+            ])
+            # Flush để đảm bảo dữ liệu được ghi ngay lập tức (phòng khi crash)
+            self.csv_file.flush()
+
+            # Debug log
+            if self.logger:
+                self.logger.info(
+                    "Lane: Off=%.2f Head=%.2f | Steer=%.1f Speed=%d", 
+                    offset, np.rad2deg(heading), steer_deg, int(target_speed)
+                )
 
         except Exception as e:
             if self.logger:
-                self.logger.debug("LaneWorker Hist Error: %s", e)
+                self.logger.info("LaneWorker error: %s", e)
+    
+    def stop(self):
+        if hasattr(self, 'csv_file') and self.csv_file:
+            self.csv_file.close()
+        super(LaneWorker, self).stop()
+
 
 class processPerception(WorkerProcess):
     """Perception process that starts a frame reader and multiple worker threads.
@@ -390,20 +467,59 @@ class processPerception(WorkerProcess):
     it in `_init_threads`.
     """
 
-    def __init__(self, queueList, logging, ready_event=None, debugging=False):
+    def __init__(self, queueList, logging, ready_event=None, debugging=False, distance_threshold_cm=100.0, distance_log_interval_sec=1.0):
         self.queuesList = queueList
         self.logging = logging
         self.debugging = debugging
+        self.ready_event = ready_event
         self._frame_queue = Queue(maxsize=4)
+        self.distance_threshold_cm = distance_threshold_cm
+        self.distance_log_interval_sec = distance_log_interval_sec
         super(processPerception, self).__init__(self.queuesList, ready_event)
+        self.model = None
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    def _init_model(self):
+        self.model_path = 'models/yolov8n.pt'
+        self.model = ultralytics.YOLO(self.model_path)
+        self.model.to(self.device)
+        self.model.fuse()
+        self.model_lock = threading.Lock()
+        self.logging.info("Perception YOLO model loaded on %s", self.device)
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        self.save_dir = os.path.join("detected_objects", ts)
+        os.makedirs(self.save_dir, exist_ok=True)
+        self.logging.info("Perception YOLO model loaded on %s", self.device)
 
     def _init_threads(self):
         # Frame reader
-        self.threads.append(FrameReader(self.queuesList, self._frame_queue, self.logging))
+        self.threads.append(
+            FrameReader(
+                self.queuesList,
+                self._frame_queue,
+                self.logging,
+                distance_threshold_cm=self.distance_threshold_cm,
+                log_interval_sec=self.distance_log_interval_sec,
+            )
+        )
 
         # Worker threads (easy to extend)
         self.threads.append(ObstacleWorker(self._frame_queue, self.queuesList, self.logging))
-        # self.threads.append(LaneWorker(self._frame_queue, self.queuesList, self.logging)) # Chưa xài nên cmt
+
+        # self.threads.append(
+        #     ObstacleWorkerYOLO(
+        #         self._frame_queue,
+        #         self.queuesList,
+        #         self.logging,
+        #         yolo_model=self.model,
+        #         device=self.device,
+        #         lock=self.model_lock,
+        #         score_thr=0.35,
+        #         save_dir=self.save_dir,
+        #     )
+        # )
+        
+        self.threads.append(LaneWorker(self._frame_queue, self.queuesList, self.logging))
 
         # Add more workers here as needed
 

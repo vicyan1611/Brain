@@ -3,4 +3,10 @@ docs/build/
 __pycache__
 **/*.pyc
 /src/dashboard/frontend/node_modules
+*.avi
+perception-yolov8/
+models/
+venv
+lane-detection
 .venv/
+*.mp4
