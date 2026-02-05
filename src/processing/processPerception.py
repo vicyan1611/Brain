@@ -362,11 +362,11 @@ class LaneWorker(BasePerceptionWorker):
             
             # 3. Actuation: Gửi tín hiệu
             steer_scaled = steer_deg * 10
-            steer_final = float(np.clip(steer_scaled, -250, 250))
+            steer_final = float(np.clip(steer_scaled, -100, 100))
             self.steer_sender.send(int(steer_final))
 
             speed_scaled = target_speed * 10
-            speed_final = float(np.clip(speed_scaled, -500, 500))
+            speed_final = float(np.clip(speed_scaled, -300, 300))
             self.speed_sender.send(int(speed_final))
 
             # Ghi dữ liệu vào CSV
