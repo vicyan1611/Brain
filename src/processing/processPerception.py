@@ -13,6 +13,7 @@ from src.utils.messages.allMessages import (
     LaneKeeping,
     Brake,
     DistanceReading,
+    SpeedFactor,
 )
 from src.processing.lane_detection import LaneCurveEstimator
 
@@ -113,9 +114,9 @@ class FrameReader(ThreadWithStop):
         if msg is None:
             return
 
-        # Drop frames if we are too far from the target
-        if self._last_distance_cm is not None and self._last_distance_cm > self.distance_threshold_cm:
-            return
+        # # Drop frames if we are too far from the target
+        # if self._last_distance_cm is not None and self._last_distance_cm > self.distance_threshold_cm:
+        #     return
         try:
             # expect base64-encoded jpeg string
             data = base64.b64decode(msg)
@@ -154,6 +155,7 @@ class ObstacleWorker(BasePerceptionWorker):
         self.warn_sender = messageHandlerSender(queuesList, WarningSignal)
         self.brake_sender = messageHandlerSender(self.queuesList, Brake)
         self.distance_sub = messageHandlerSubscriber(queuesList, DistanceReading, "lastOnly", True)
+        self.speed_factor_sender = messageHandlerSender(queuesList, SpeedFactor)
         
         # Distance-based speed control parameters
         self._safe_distance_cm = 100.0      # No speed reduction above this
@@ -167,19 +169,15 @@ class ObstacleWorker(BasePerceptionWorker):
         if latest_distance is not None:
             speed_factor = self._calculate_speed_factor(latest_distance)
             
-            # Send speed reduction command
+            # Send speed factor to LaneWorker via SpeedFactor message
             try:
-                # Assuming base speed is controlled by LaneWorker, we send a reduction factor
-                # If distance requires stopping, send "0"
+                self.speed_factor_sender.send(speed_factor)
                 if speed_factor <= 0:
+                    # Emergency stop: also send direct brake command
                     self.speed_sender.send("0")
                     self.brake_sender.send("0")
                     if self.logger:
                         self.logger.warning("ObstacleWorker: CRITICAL distance %.2f cm - STOPPING", latest_distance)
-                else:
-                    # For proportional control, we could send scaled speed
-                    # But since LaneWorker controls speed, we'll only intervene when needed
-                    pass
             except Exception as e:
                 if self.logger:
                     self.logger.debug("ObstacleWorker send error: %s", e)
@@ -189,7 +187,7 @@ class ObstacleWorker(BasePerceptionWorker):
             if latest_distance < self._warning_distance_cm and (now - self._last_warn_time) > 2.0:
                 self._last_warn_time = now
                 try:
-                    self.warn_sender.send(f"distance:{latest_distance:.2f}cm,factor:{speed_factor:.2f}")
+                    self.warn_sender.send(f"distance:{latest_distance:.2f}cm, factor:{speed_factor:.2f}")
                 except Exception:
                     pass
                 if self.logger:
@@ -315,8 +313,6 @@ class ObstacleWorkerYOLO(BasePerceptionWorker):
             if self.logger:
                 self.logger.debug("ObstacleWorkerYOLO error: %s", e)
 
-        
-
 class LaneWorker(BasePerceptionWorker):
     """
     Lane detection worker that uses Adaptive Controller.
@@ -329,6 +325,9 @@ class LaneWorker(BasePerceptionWorker):
         self.steer_sender = messageHandlerSender(queuesList, SteerMotor)
         self.speed_sender = messageHandlerSender(queuesList, SpeedMotor) 
         self.lane_sender = messageHandlerSender(queuesList, LaneKeeping)
+        
+        # Subscribe to speed factor from ObstacleWorker
+        self.speed_factor_sub = messageHandlerSubscriber(queuesList, SpeedFactor, "lastOnly", True)
         
         # Khởi tạo Logic
         self.estimator = LaneCurveEstimator()
@@ -360,9 +359,18 @@ class LaneWorker(BasePerceptionWorker):
             # 2. Control: Tính góc lái và tốc độ
             steer_deg, target_speed = self.controller.get_control(offset, heading)
             
-            # 3. Actuation: Gửi tín hiệu
+            # 3. Apply speed factor from ObstacleWorker (default 1.0 = no reduction)
+            speed_factor = self.speed_factor_sub.receive()
+            if speed_factor is None:
+                speed_factor = 1.0
+            speed_factor = float(speed_factor)
+            target_speed = target_speed * speed_factor
+            if speed_factor < 0.01:
+                steer_deg = 0  # Override to straight if we are basically stopped
+            
+            # 4. Actuation: Gửi tín hiệu
             steer_scaled = steer_deg * 10
-            steer_final = float(np.clip(steer_scaled, -250, 250))
+            steer_final = float(np.clip(steer_scaled, -100, 100))
             self.steer_sender.send(int(steer_final))
 
             speed_scaled = target_speed * 10
@@ -384,8 +392,8 @@ class LaneWorker(BasePerceptionWorker):
             # Debug log
             if self.logger:
                 self.logger.info(
-                    "Lane: Off=%.2f Head=%.2f | Steer=%.1f Speed=%d", 
-                    offset, np.rad2deg(heading), steer_deg, int(target_speed)
+                    "Lane: Off=%.2f Head=%.2f | Steer=%.1f Speed=%d Factor=%.2f", 
+                    offset, np.rad2deg(heading), steer_deg, int(target_speed), speed_factor
                 )
 
         except Exception as e:
@@ -396,59 +404,6 @@ class LaneWorker(BasePerceptionWorker):
         if hasattr(self, 'csv_file') and self.csv_file:
             self.csv_file.close()
         super(LaneWorker, self).stop()
-
-
-
-class HardcodedWorker(BasePerceptionWorker):
-    """
-    Hardcoded sequence for demo/testing.
-    Sequence:
-    - 0-5s: Straight (0 deg), Speed 30 cm/s
-    - 5-6s: Turn 13 deg, Speed 30 cm/s
-    - 6-8s: Turn 15 deg, Speed 30 cm/s
-    - >8s: Stop
-    """
-    def __init__(self, frame_queue, queuesList, logger=None, pause=0.1):
-        super(HardcodedWorker, self).__init__(frame_queue, queuesList, logger, pause)
-        self.steer_sender = messageHandlerSender(queuesList, SteerMotor)
-        self.speed_sender = messageHandlerSender(queuesList, SpeedMotor)
-        self.start_time = None
-
-    def thread_work(self):
-        if self.start_time is None:
-            self.start_time = time.time()
-            if self.logger:
-                self.logger.info("HardcodedWorker started sequence at %f", self.start_time)
-
-        elapsed = time.time() - self.start_time
-        
-        target_speed = 0
-        target_steer = 0
-
-        # Sequence Logic
-        if elapsed < 5.0:
-            # 0-5s: Straight, Speed 30
-            target_speed = 300 # 30 cm/s * 10
-            target_steer = 0
-        elif elapsed < 6.0:
-            # 5-6s: Turn 13 deg
-            target_speed = 300
-            target_steer = 130 # 13 deg * 10
-        elif elapsed < 8.0:
-            # 6-8s: Turn 15 deg
-            target_speed = 300
-            target_steer = 150 # 15 deg * 10
-        else:
-            # >8s: Stop
-            target_speed = 0
-            target_steer = 0
-        
-        # Send
-        self.speed_sender.send(str(int(target_speed)))
-        self.steer_sender.send(str(int(target_steer)))
-
-        if self.logger:
-             self.logger.info("Hardcoded: T=%.1f | Speed=%s Steer=%s", elapsed, target_speed, target_steer)
 
 
 class processPerception(WorkerProcess):
@@ -510,8 +465,7 @@ class processPerception(WorkerProcess):
         #     )
         # )
         
-        # self.threads.append(LaneWorker(self._frame_queue, self.queuesList, self.logging))
-        self.threads.append(HardcodedWorker(self._frame_queue, self.queuesList, self.logging))
+        self.threads.append(LaneWorker(self._frame_queue, self.queuesList, self.logging))
 
         # Add more workers here as needed
 

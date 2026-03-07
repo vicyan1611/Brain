@@ -8,3 +8,7 @@ perception-yolov8/
 models/
 venv
 lane-detection
+src/dashboard/frontend/.angular/cache/*
+src/dashboard/frontend/src/app/webSocket/*
+temp/*
+logs/*.csv
