@@ -13,6 +13,7 @@ from src.utils.messages.allMessages import (
     LaneKeeping,
     Brake,
     DistanceReading,
+    SpeedFactor,
 )
 from src.processing.lane_detection import LaneCurveEstimator
 
@@ -82,11 +83,12 @@ class AdaptiveController:
 class FrameReader(ThreadWithStop):
     """Reads frames from `serialCamera` messages and pushes decoded frames into a local queue."""
 
-    def __init__(self, queuesList, frame_queue, logger=None, pause=0.01, distance_threshold_cm=150.0, log_interval_sec=1.0):
+    def __init__(self, queuesList, frame_queue, target_queues, logger=None, pause=0.01, distance_threshold_cm=150.0, log_interval_sec=1.0):
         super(FrameReader, self).__init__(pause=pause)
         self.sub = messageHandlerSubscriber(queuesList, serialCamera, "lastOnly", True)
         self.distance_sub = messageHandlerSubscriber(queuesList, DistanceReading, "lastOnly", True)
-        self.q = frame_queue
+        # self.q = frame_queue
+        self.q = target_queues
         self.logger = logger
         self.distance_threshold_cm = distance_threshold_cm
         self.log_interval_sec = log_interval_sec
@@ -113,9 +115,9 @@ class FrameReader(ThreadWithStop):
         if msg is None:
             return
 
-        # Drop frames if we are too far from the target
-        if self._last_distance_cm is not None and self._last_distance_cm > self.distance_threshold_cm:
-            return
+        # # Drop frames if we are too far from the target
+        # if self._last_distance_cm is not None and self._last_distance_cm > self.distance_threshold_cm:
+        #     return
         try:
             # expect base64-encoded jpeg string
             data = base64.b64decode(msg)
@@ -123,11 +125,19 @@ class FrameReader(ThreadWithStop):
             frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
             if frame is None:
                 return
-            try:
-                self.q.put_nowait(frame)
-            except Full:
-                # drop frame if workers are busy
-                pass
+            # try:
+            #     self.q.put_nowait(frame)
+            # except Full:
+            #     # drop frame if workers are busy
+            #     pass
+
+            # Ở đây cần vòng lặp để đẩy ảnh vào tất cả các queues
+            for q in self.target_queues:
+                try:
+                    q.put_nowait(frame)
+                except Full:
+                    pass # drop frame if worker is busy
+
         except Exception as e:
             if self.logger:
                 self.logger.debug("FrameReader decode error: %s", e)
@@ -156,6 +166,7 @@ class ObstacleWorker(BasePerceptionWorker):
         self.warn_sender = messageHandlerSender(queuesList, WarningSignal)
         self.brake_sender = messageHandlerSender(self.queuesList, Brake)
         self.distance_sub = messageHandlerSubscriber(queuesList, DistanceReading, "lastOnly", True)
+        self.speed_factor_sender = messageHandlerSender(queuesList, SpeedFactor)
         
         # Distance-based speed control parameters
         self._safe_distance_cm = 100.0      # No speed reduction above this
@@ -169,19 +180,15 @@ class ObstacleWorker(BasePerceptionWorker):
         if latest_distance is not None:
             speed_factor = self._calculate_speed_factor(latest_distance)
             
-            # Send speed reduction command
+            # Send speed factor to LaneWorker via SpeedFactor message
             try:
-                # Assuming base speed is controlled by LaneWorker, we send a reduction factor
-                # If distance requires stopping, send "0"
+                self.speed_factor_sender.send(speed_factor)
                 if speed_factor <= 0:
+                    # Emergency stop: also send direct brake command
                     self.speed_sender.send("0")
                     self.brake_sender.send("0")
                     if self.logger:
                         self.logger.warning("ObstacleWorker: CRITICAL distance %.2f cm - STOPPING", latest_distance)
-                else:
-                    # For proportional control, we could send scaled speed
-                    # But since LaneWorker controls speed, we'll only intervene when needed
-                    pass
             except Exception as e:
                 if self.logger:
                     self.logger.debug("ObstacleWorker send error: %s", e)
@@ -191,7 +198,7 @@ class ObstacleWorker(BasePerceptionWorker):
             if latest_distance < self._warning_distance_cm and (now - self._last_warn_time) > 2.0:
                 self._last_warn_time = now
                 try:
-                    self.warn_sender.send(f"distance:{latest_distance:.2f}cm,factor:{speed_factor:.2f}")
+                    self.warn_sender.send(f"distance:{latest_distance:.2f}cm, factor:{speed_factor:.2f}")
                 except Exception:
                     pass
                 if self.logger:
@@ -377,14 +384,97 @@ class ObstacleWorkerYOLO(BasePerceptionWorker):
             if self.logger:
                 self.logger.debug("ObstacleWorkerYOLO error: %s", e)
 
+class TrafficSignWorker(BasePerceptionWorker):
+    """
+    Nhận diện biển báo bằng YOLOv8. 
+    Class 11 trong COCO dataset là 'stop sign'.
+    """
+    def __init__(self, frame_queue, queuesList, global_stop_event, yolo_model, device="cpu", lock=None, logger=None, pause=0.05):
+        super(TrafficSignWorker, self).__init__(frame_queue, queuesList, logger, pause)
+        self.model = yolo_model
+        self.device = device
+        self.lock = lock or threading.Lock()
         
+        self.global_stop_event = global_stop_event # Cờ báo dừng toàn hệ thống
+        
+        # --- THÔNG SỐ CONFIG ---
+        self.stop_sign_class_id = 11       # ID của biển Stop trong YOLOv8 COCO
+        self.conf_threshold = 0.5          # Độ tự tin tối thiểu (50%)
+        self.size_threshold = 0.03         # Diện tích biển báo / Diện tích ảnh (Càng lớn xe càng dừng gần biển)
+        
+        # --- STATE MACHINE ---
+        self.is_stopping = False
+        self.stop_start_time = 0
+        self.stop_duration = 5.0           # Dừng 5 giây
+        self.cooldown_until = 0
+        self.cooldown_duration = 4.0       # Sau khi dừng, bỏ qua biển Stop 4 giây để xe đi qua hẳn
+
+    def thread_work(self):
+        now = time.time()
+        
+        # 1. Kiểm tra trạng thái đang Dừng
+        if self.is_stopping:
+            if now - self.stop_start_time <= self.stop_duration:
+                # Vẫn đang trong thời gian 5 giây chờ, không làm gì cả
+                return
+            else:
+                # Đã hết 5 giây, thả cờ cho xe chạy tiếp và vào trạng thái Cooldown
+                self.is_stopping = False
+                self.global_stop_event.clear()
+                self.cooldown_until = now + self.cooldown_duration
+                if self.logger:
+                    self.logger.info("TrafficSign: Done waiting for 5s. Continue going!")
+                return
+
+        # 2. Kiểm tra trạng thái Cooldown (Vừa dừng xong, đang đi qua biển báo)
+        if now < self.cooldown_until:
+            return
+
+        # 3. Lấy ảnh và phân tích YOLO
+        try:
+            frame = self.q.get(timeout=0.5)
+        except Empty:
+            return
+
+        try:
+            with torch.inference_mode():
+                with self.lock:
+                    results = self.model(frame, verbose=False, device=self.device)[0]
+
+            for box in results.boxes:
+                cls_id = int(box.cls)
+                if cls_id == self.stop_sign_class_id:
+                    conf = float(box.conf)
+                    if conf > self.conf_threshold:
+                        # Tính toán diện tích bounding box để biết biển báo đang ở xa hay gần
+                        xyxy = box.xyxy[0].tolist()
+                        box_w = xyxy[2] - xyxy[0]
+                        box_h = xyxy[3] - xyxy[1]
+                        
+                        frame_area = frame.shape[0] * frame.shape[1]
+                        box_area = box_w * box_h
+                        ratio = box_area / frame_area
+
+                        # Nếu biển báo đủ to (xe đã tới gần vạch dừng)
+                        if ratio > self.size_threshold:
+                            self.is_stopping = True
+                            self.stop_start_time = now
+                            self.global_stop_event.set() # BẬT CỜ DỪNG XE
+                            
+                            if self.logger:
+                                self.logger.warning(f"TrafficSign: Thấy biển STOP! (Kích thước: {ratio:.3f}). DỪNG 5 GIÂY.")
+                            break # Chỉ cần xử lý 1 biển báo là đủ
+                            
+        except Exception as e:
+            if self.logger:
+                self.logger.debug(f"TrafficSignWorker error: {e}")
 
 class LaneWorker(BasePerceptionWorker):
     """
     Lane detection worker that uses Adaptive Controller.
     Controls BOTH Steer and Speed based on road curvature.
     """
-    def __init__(self, frame_queue, queuesList, logger=None, pause=0.02):
+    def __init__(self, frame_queue, queuesList,global_stop_event, logger=None, pause=0.02):
         super(LaneWorker, self).__init__(frame_queue, queuesList, logger, pause)
         
         # Senders
@@ -392,9 +482,15 @@ class LaneWorker(BasePerceptionWorker):
         self.speed_sender = messageHandlerSender(queuesList, SpeedMotor) 
         self.lane_sender = messageHandlerSender(queuesList, LaneKeeping)
         
+        # Subscribe to speed factor from ObstacleWorker
+        self.speed_factor_sub = messageHandlerSubscriber(queuesList, SpeedFactor, "lastOnly", True)
+        
         # Khởi tạo Logic
         self.estimator = LaneCurveEstimator()
         self.controller = AdaptiveController() 
+
+        # biến dừng toàn cục cho stop traffic sign
+        self.global_stop_event = global_stop_event
 
         self.log_dir = "logs"
         os.makedirs(self.log_dir, exist_ok=True)
@@ -421,15 +517,31 @@ class LaneWorker(BasePerceptionWorker):
             
             # 2. Control: Tính góc lái và tốc độ
             steer_deg, target_speed = self.controller.get_control(offset, heading)
+
+            # 2.5 Kiểm tra cờ traffic sign
+            if self.global_stop_event.is_set():
+                target_speed = 0  # Ép tốc độ về 0 ngay lập tức
+                steer_deg = 0     # Trả lái thẳng (tùy chọn)
             
-            # 3. Actuation: Gửi tín hiệu
+            # 3. Apply speed factor from ObstacleWorker (default 1.0 = no reduction)
+            speed_factor = self.speed_factor_sub.receive()
+            if speed_factor is None:
+                speed_factor = 1.0
+            speed_factor = float(speed_factor)
+            target_speed = target_speed * speed_factor
+            if speed_factor < 0.01:
+                steer_deg = 0  # Override to straight if we are basically stopped
+            
+            # 4. Actuation: Gửi tín hiệu
             steer_scaled = steer_deg * 10
             steer_final = float(np.clip(steer_scaled, -100, 100))
             self.steer_sender.send(int(steer_final))
+            # self.steer_sender.send(str(int(steer_final)))
 
             speed_scaled = target_speed * 10
             speed_final = float(np.clip(speed_scaled, -300, 300))
             self.speed_sender.send(int(speed_final))
+            # self.speed_sender.send(str(int(speed_final)))
 
             # Ghi dữ liệu vào CSV
             self.csv_writer.writerow([
@@ -446,8 +558,8 @@ class LaneWorker(BasePerceptionWorker):
             # Debug log
             if self.logger:
                 self.logger.info(
-                    "Lane: Off=%.2f Head=%.2f | Steer=%.1f Speed=%d", 
-                    offset, np.rad2deg(heading), steer_deg, int(target_speed)
+                    "Lane: Off=%.2f Head=%.2f | Steer=%.1f Speed=%d Factor=%.2f", 
+                    offset, np.rad2deg(heading), steer_deg, int(target_speed), speed_factor
                 )
 
         except Exception as e:
@@ -479,6 +591,9 @@ class processPerception(WorkerProcess):
         self.model = None
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
+        # tạo cờ toàn cục cho toàn hệ thống
+        self.global_stop_event = threading.Event()
+
     def _init_model(self):
         self.model_path = 'models/yolov8n.pt'
         self.model = ultralytics.YOLO(self.model_path)
@@ -492,19 +607,41 @@ class processPerception(WorkerProcess):
         self.logging.info("Perception YOLO model loaded on %s", self.device)
 
     def _init_threads(self):
-        # Frame reader
+        # Note: Cần tạo queue riêng cho từng worker để tránh mất frame
+        self.lane_queue = Queue(maxsize=2)
+        self.obstacle_queue = Queue(maxsize=2)
+        self.sign_queue = Queue(maxsize=2)
+
+        # Truyền list các queue vào FrameReader => cần cập nhật FrameReader để đẩy ảnh vào cả 3 queue này
         self.threads.append(
             FrameReader(
                 self.queuesList,
-                self._frame_queue,
+                # self._frame_queue,
+                [self.lane_queue, self.obstacle_queue, self.sign_queue], # Đẩy vào dạng list
                 self.logging,
                 distance_threshold_cm=self.distance_threshold_cm,
                 log_interval_sec=self.distance_log_interval_sec,
             )
         )
 
+        # Khởi tạo Obstacle Sensor - sao không thấy Phúc tạo thread này nhỉ
+        # self.threads.append(ObstacleWorker(self.obstacle_queue, self.queuesList, self.logging))
+
         # Worker threads (easy to extend)
-        self.threads.append(ObstacleWorker(self._frame_queue, self.queuesList, self.logging))
+        self.threads.append(LaneWorker(self.lane_queue, self.queuesList, self.global_stop_event, self.logging))
+
+        # Khởi tạo trafficsignworker
+        self.threads.append(
+            TrafficSignWorker(
+                frame_queue=self.sign_queue,
+                queuesList=self.queuesList,
+                global_stop_event=self.global_stop_event,
+                yolo_model=self.model,
+                device=self.device,
+                lock=self.model_lock,
+                logger=self.logging
+            )
+        )
 
         # self.threads.append(
         #     ObstacleWorkerYOLO(
@@ -519,7 +656,7 @@ class processPerception(WorkerProcess):
         #     )
         # )
         
-        self.threads.append(LaneWorker(self._frame_queue, self.queuesList, self.logging))
+        # self.threads.append(HardcodedWorker(self._frame_queue, self.queuesList, self.logging))
 
         # Add more workers here as needed
 

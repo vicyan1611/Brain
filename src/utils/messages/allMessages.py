@@ -302,6 +302,13 @@ class WarningSignal(Enum):
     msgID = 2
     msgType = "str"
 
+################################# From Perception Workers ##################################
+class SpeedFactor(Enum):
+    Queue = "General"
+    Owner = "obstacleWorker"
+    msgID = 14
+    msgType = "float"
+
 class SerialConnectionState(Enum):
     Queue = "General"
     Owner = "processSerialHandler"

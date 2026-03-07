@@ -12,3 +12,4 @@ scipy>=1.15,<2
 torch
 ultralytics
 numpy>=1.24,<2        # required by torch/ultralytics and scipy
+ultralytics

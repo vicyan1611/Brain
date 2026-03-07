@@ -38,7 +38,7 @@ class DistanceReader(ThreadWithStop):
 			self.sender.send(distance_cm)
 
 			if self.logger:
-				self.logger.info("DistanceReader: %.2f cm", distance_cm)
+				self.logger.debug("DistanceReader: %.2f cm", distance_cm)
 		except Exception as e:
 			if self.logger:
 				self.logger.error("DistanceReader error: %s", e)
