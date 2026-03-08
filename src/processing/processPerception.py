@@ -83,11 +83,14 @@ class AdaptiveController:
 class FrameReader(ThreadWithStop):
     """Reads frames from `serialCamera` messages and pushes decoded frames into a local queue."""
 
-    def __init__(self, queuesList, frame_queue, logger=None, pause=0.01, distance_threshold_cm=150.0, log_interval_sec=1.0):
+    def __init__(self, queuesList, frame_queue, target_queues, logger=None, pause=0.01, distance_threshold_cm=150.0, log_interval_sec=1.0):
         super(FrameReader, self).__init__(pause=pause)
         self.sub = messageHandlerSubscriber(queuesList, serialCamera, "lastOnly", True)
         self.distance_sub = messageHandlerSubscriber(queuesList, DistanceReading, "lastOnly", True)
-        self.q = frame_queue
+
+        # self.q = frame_queue
+        self.target_queues = target_queues
+
         self.logger = logger
         self.distance_threshold_cm = distance_threshold_cm
         self.log_interval_sec = log_interval_sec
@@ -114,19 +117,20 @@ class FrameReader(ThreadWithStop):
         if msg is None:
             return
 
-        # # Drop frames if we are too far from the target
-        # if self._last_distance_cm is not None and self._last_distance_cm > self.distance_threshold_cm:
-        #     return
         try:
             # expect base64-encoded jpeg string
             data = base64.b64decode(msg)
             arr = np.frombuffer(data, dtype=np.uint8)
             frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-            try:
-                self.q.put_nowait(frame)
-            except Full:
-                # drop frame if workers are busy
-                pass
+            if frame is None:
+                return
+            
+            for q in self.target_queues:
+                try:
+                    q.put_nowait(frame)
+                except Full:
+                    pass # drop frame if worker is busy
+                    
         except Exception as e:
             if self.logger:
                 self.logger.debug("FrameReader decode error: %s", e)
@@ -499,60 +503,6 @@ class LaneWorker(BasePerceptionWorker):
         if hasattr(self, 'csv_file') and self.csv_file:
             self.csv_file.close()
         super(LaneWorker, self).stop()
-
-
-
-# class HardcodedWorker(BasePerceptionWorker):
-#     """
-#     Hardcoded sequence for demo/testing.
-#     Sequence:
-#     - 0-5s: Straight (0 deg), Speed 30 cm/s
-#     - 5-6s: Turn 13 deg, Speed 30 cm/s
-#     - 6-8s: Turn 15 deg, Speed 30 cm/s
-#     - >8s: Stop
-#     """
-#     def __init__(self, frame_queue, queuesList, logger=None, pause=0.1):
-#         super(HardcodedWorker, self).__init__(frame_queue, queuesList, logger, pause)
-#         self.steer_sender = messageHandlerSender(queuesList, SteerMotor)
-#         self.speed_sender = messageHandlerSender(queuesList, SpeedMotor)
-#         self.start_time = None
-
-#     def thread_work(self):
-#         if self.start_time is None:
-#             self.start_time = time.time()
-#             if self.logger:
-#                 self.logger.info("HardcodedWorker started sequence at %f", self.start_time)
-
-#         elapsed = time.time() - self.start_time
-        
-#         target_speed = 0
-#         target_steer = 0
-
-#         # Sequence Logic
-#         if elapsed < 5.0:
-#             # 0-5s: Straight, Speed 30
-#             target_speed = 300 # 30 cm/s * 10
-#             target_steer = 0
-#         elif elapsed < 6.0:
-#             # 5-6s: Turn 13 deg
-#             target_speed = 300
-#             target_steer = 130 # 13 deg * 10
-#         elif elapsed < 8.0:
-#             # 6-8s: Turn 15 deg
-#             target_speed = 300
-#             target_steer = 150 # 15 deg * 10
-#         else:
-#             # >8s: Stop
-#             target_speed = 0
-#             target_steer = 0
-        
-#         # Send
-#         self.speed_sender.send(str(int(target_speed)))
-#         self.steer_sender.send(str(int(target_steer)))
-
-#         if self.logger:
-#              self.logger.info("Hardcoded: T=%.1f | Speed=%s Steer=%s", elapsed, target_speed, target_steer)
-
 
 class processPerception(WorkerProcess):
     """Perception process that starts a frame reader and multiple worker threads.
