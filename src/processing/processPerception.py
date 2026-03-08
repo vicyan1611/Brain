@@ -84,7 +84,7 @@ class AdaptiveController:
 class FrameReader(ThreadWithStop):
     """Reads frames from `serialCamera` messages and pushes decoded frames into a local queue."""
 
-    def __init__(self, queuesList, frame_queue, target_queues, logger=None, pause=0.01, distance_threshold_cm=150.0, log_interval_sec=1.0):
+    def __init__(self, queuesList, target_queues, logger=None, pause=0.01, distance_threshold_cm=150.0, log_interval_sec=1.0):
         super(FrameReader, self).__init__(pause=pause)
         self.sub = messageHandlerSubscriber(queuesList, serialCamera, "lastOnly", True)
         self.distance_sub = messageHandlerSubscriber(queuesList, DistanceReading, "lastOnly", True)
@@ -408,7 +408,7 @@ class LaneWorker(BasePerceptionWorker):
     Lane detection worker that uses Adaptive Controller.
     Controls BOTH Steer and Speed based on road curvature.
     """
-    def __init__(self, frame_queue, queuesList,global_stop_event, logger=None, pause=0.02):
+    def __init__(self, frame_queue, queuesList, global_stop_event, logger=None, pause=0.02):
         super(LaneWorker, self).__init__(frame_queue, queuesList, logger, pause)
         
         # Senders
@@ -499,8 +499,7 @@ class LaneWorker(BasePerceptionWorker):
         except Exception as e:
             if self.logger:
                 self.logger.info("LaneWorker error: %s", e)
-                self.logger.error(f"LaneWorker CRASHED: {e}", exc_info=True)
-    
+
     def stop(self):
         if hasattr(self, 'csv_file') and self.csv_file:
             self.csv_file.close()
@@ -548,8 +547,7 @@ class processPerception(WorkerProcess):
         self.threads.append(
             FrameReader(
                 self.queuesList,
-                # self._frame_queue,
-                [self.lane_queue, self.obstacle_queue, self.sign_queue], # Đẩy vào dạng list
+                [self.lane_queue, self.obstacle_queue, self.sign_queue], 
                 self.logging,
                 distance_threshold_cm=self.distance_threshold_cm,
                 log_interval_sec=self.distance_log_interval_sec,
@@ -557,7 +555,6 @@ class processPerception(WorkerProcess):
         )
 
         # Worker threads (easy to extend)
-        # self.threads.append(ObstacleWorker(self._frame_queue, self.queuesList, self.logging)) # này của Phúc, đổi qua xài queue
         self.threads.append(ObstacleWorker(self.obstacle_queue, self.queuesList, self.logging))
 
         # Khởi tạo LaneWorker 
@@ -575,6 +572,7 @@ class processPerception(WorkerProcess):
                 logger=self.logging
             )
         )
+        # self.threads.append(TrafficSignWorker(self.sign_queue, self.queuesList, self.global_stop_event, self.model, self.device, self.model_lock, self.logging))
 
         # self.threads.append(
         #     ObstacleWorkerYOLO(

@@ -53,31 +53,6 @@ from src.utils.bigPrintMessages import BigPrint
 from src.utils.outputWriters import QueueWriter, MultiWriter
 import logging
 
-# --- CẤU HÌNH GHI LOG RA FILE ---
-# 1. Tạo thư mục logs ở thư mục gốc nếu chưa có
-LOG_DIR = "logs_traffic_sign"
-os.makedirs(LOG_DIR, exist_ok=True)
-
-# 2. Tạo tên file log theo thời gian chạy
-ts = time.strftime("%Y%m%d_%H%M%S")
-log_filename = os.path.join(LOG_DIR, f"system_crash_{ts}.log")
-
-# 3. Cấu hình logging để ghi ra cả màn hình (Console) và File
-logging.basicConfig(
-    level=logging.DEBUG, # Chuyển sang DEBUG để thấy MỌI THỨ
-    format='%(asctime)s | %(levelname)-8s | %(processName)-15s | %(message)s',
-    handlers=[
-        logging.FileHandler(log_filename, mode='w', encoding='utf-8'),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-
-logging.info(f"==================================================")
-logging.info(f"HỆ THỐNG BẮT ĐẦU KHỞI ĐỘNG - Log file: {log_filename}")
-logging.info(f"==================================================")
-
-logging.basicConfig(level=logging.INFO)
-
 # ===================================== PROCESS IMPORTS ==================================
 
 from src.gateway.processGateway import processGateway
