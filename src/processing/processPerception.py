@@ -247,24 +247,119 @@ class ObstacleWorker(BasePerceptionWorker):
         #     if self.logger:
         #         self.logger.debug("ObstacleWorker error: %s", e)
 
-class ObstacleWorkerYOLO(BasePerceptionWorker):
-    """Detect obstacles using YOLOv8 model."""
-    def __init__(self, frame_queue, queuesList, logger=None, pause=0.01,
-                yolo_model=None, device="cpu", lock=None, score_thr=0.35, save_dir=None):
+# class ObstacleWorkerYOLO(BasePerceptionWorker):
+#     """Detect obstacles using YOLOv8 model."""
+#     def __init__(self, frame_queue, queuesList, logger=None, pause=0.01,
+#                 yolo_model=None, device="cpu", lock=None, score_thr=0.35, save_dir=None):
         
-        super(ObstacleWorkerYOLO, self).__init__(frame_queue, queuesList, logger, pause)
-        self.speed_sender = messageHandlerSender(queuesList, SpeedMotor)
-        self.warn_sender = messageHandlerSender(queuesList, WarningSignal)
-        self.brake_sender = messageHandlerSender(self.queuesList, Brake)
+#         super(ObstacleWorkerYOLO, self).__init__(frame_queue, queuesList, logger, pause)
+#         self.speed_sender = messageHandlerSender(queuesList, SpeedMotor)
+#         self.warn_sender = messageHandlerSender(queuesList, WarningSignal)
+#         self.brake_sender = messageHandlerSender(self.queuesList, Brake)
+#         self.model = yolo_model
+#         self.device = device
+#         self.lock = lock or threading.Lock()
+#         self.score_thr = score_thr
+#         self.save_dir = save_dir
+#         self._frame_idx = 0
+#         self._last_stop_time = 0
+
+#     def thread_work(self):
+#         try:
+#             frame = self.q.get(timeout=0.5)
+#         except Empty:
+#             return
+
+#         try:
+#             with torch.inference_mode():
+#                 # lock to avoid concurrent model() calls from multiple threads
+#                 with self.lock:
+#                     results = self.model(frame, verbose=False, device=self.device)[0]
+#                     self.logger.debug("ObstacleWorkerYOLO: %d boxes detected", len(results.boxes))
+
+#             for box in results.boxes:
+#                 conf = float(box.conf)
+#                 if conf < self.score_thr:
+#                     continue
+#                 cls_id = int(box.cls)
+#                 xyxy = box.xyxy[0].tolist()
+
+#                 # ----- Handle detected obstacle -----
+#                 if self.save_dir:
+#                     self._frame_idx += 1
+#                     vis = frame.copy()
+#                     x1, y1, x2, y2 = map(int, xyxy)
+#                     cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 0), 2)
+#                     cv2.putText(vis, f"{cls_id}:{conf:.2f}", (x1, y1 - 5),
+#                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+#                     out_path = os.path.join(self.save_dir, f"frame_{self._frame_idx:06d}.jpg")
+#                     cv2.imwrite(out_path, vis)                    
+#                 # ----- Finish handling obstacle -----
+
+#                 # # simple action: stop and warn once per second
+#                 # now = time.time()
+#                 # if now - self._last_stop_time > 1.0:
+#                 #     self._last_stop_time = now
+#                 #     try:
+#                 #         self.speed_sender.send("0")
+#                 #         self.brake_sender.send("0")
+#                 #     except Exception:
+#                 #         pass
+#                 #     try:
+#                 #         self.warn_sender.send(f"yolo:{cls_id}:{conf:.2f}")
+#                 #     except Exception:
+#                 #         pass
+#         except Exception as e:
+#             if self.logger:
+#                 self.logger.debug("ObstacleWorkerYOLO error: %s", e)
+
+class TrafficSignWorker(BasePerceptionWorker):
+    """
+    Nhận diện biển báo bằng YOLOv8. 
+    Class 11 trong COCO dataset là 'stop sign'.
+    """
+    def __init__(self, frame_queue, queuesList, global_stop_event, yolo_model, device="cpu", lock=None, logger=None, pause=0.05):
+        super(TrafficSignWorker, self).__init__(frame_queue, queuesList, logger, pause)
         self.model = yolo_model
         self.device = device
         self.lock = lock or threading.Lock()
-        self.score_thr = score_thr
-        self.save_dir = save_dir
-        self._frame_idx = 0
-        self._last_stop_time = 0
+        
+        self.global_stop_event = global_stop_event # Cờ báo dừng toàn hệ thống
+        
+        # --- THÔNG SỐ CONFIG ---
+        self.stop_sign_class_id = 11       # ID của biển Stop trong YOLOv8 COCO
+        self.conf_threshold = 0.5          # Độ tự tin tối thiểu (50%)
+        self.size_threshold = 0.03         # Diện tích biển báo / Diện tích ảnh (Càng lớn xe càng dừng gần biển)
+        
+        # --- STATE MACHINE ---
+        self.is_stopping = False
+        self.stop_start_time = 0
+        self.stop_duration = 5.0           # Dừng 5 giây
+        self.cooldown_until = 0
+        self.cooldown_duration = 4.0       # Sau khi dừng, bỏ qua biển Stop 4 giây để xe đi qua hẳn
 
     def thread_work(self):
+        now = time.time()
+        
+        # 1. Kiểm tra trạng thái đang Dừng
+        if self.is_stopping:
+            if now - self.stop_start_time <= self.stop_duration:
+                # Vẫn đang trong thời gian 5 giây chờ, không làm gì cả
+                return
+            else:
+                # Đã hết 5 giây, thả cờ cho xe chạy tiếp và vào trạng thái Cooldown
+                self.is_stopping = False
+                self.global_stop_event.clear()
+                self.cooldown_until = now + self.cooldown_duration
+                if self.logger:
+                    self.logger.info("TrafficSign: Đã chờ xong 5s. Tiếp tục chạy!")
+                return
+
+        # 2. Kiểm tra trạng thái Cooldown (Vừa dừng xong, đang đi qua biển báo)
+        if now < self.cooldown_until:
+            return
+
+        # 3. Lấy ảnh và phân tích YOLO
         try:
             frame = self.q.get(timeout=0.5)
         except Empty:
@@ -272,46 +367,36 @@ class ObstacleWorkerYOLO(BasePerceptionWorker):
 
         try:
             with torch.inference_mode():
-                # lock to avoid concurrent model() calls from multiple threads
                 with self.lock:
                     results = self.model(frame, verbose=False, device=self.device)[0]
-                    self.logger.debug("ObstacleWorkerYOLO: %d boxes detected", len(results.boxes))
 
             for box in results.boxes:
-                conf = float(box.conf)
-                if conf < self.score_thr:
-                    continue
                 cls_id = int(box.cls)
-                xyxy = box.xyxy[0].tolist()
+                if cls_id == self.stop_sign_class_id:
+                    conf = float(box.conf)
+                    if conf > self.conf_threshold:
+                        # Tính toán diện tích bounding box để biết biển báo đang ở xa hay gần
+                        xyxy = box.xyxy[0].tolist()
+                        box_w = xyxy[2] - xyxy[0]
+                        box_h = xyxy[3] - xyxy[1]
+                        
+                        frame_area = frame.shape[0] * frame.shape[1]
+                        box_area = box_w * box_h
+                        ratio = box_area / frame_area
 
-                # ----- Handle detected obstacle -----
-                if self.save_dir:
-                    self._frame_idx += 1
-                    vis = frame.copy()
-                    x1, y1, x2, y2 = map(int, xyxy)
-                    cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    cv2.putText(vis, f"{cls_id}:{conf:.2f}", (x1, y1 - 5),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-                    out_path = os.path.join(self.save_dir, f"frame_{self._frame_idx:06d}.jpg")
-                    cv2.imwrite(out_path, vis)                    
-                # ----- Finish handling obstacle -----
-
-                # # simple action: stop and warn once per second
-                # now = time.time()
-                # if now - self._last_stop_time > 1.0:
-                #     self._last_stop_time = now
-                #     try:
-                #         self.speed_sender.send("0")
-                #         self.brake_sender.send("0")
-                #     except Exception:
-                #         pass
-                #     try:
-                #         self.warn_sender.send(f"yolo:{cls_id}:{conf:.2f}")
-                #     except Exception:
-                #         pass
+                        # Nếu biển báo đủ to (xe đã tới gần vạch dừng)
+                        if ratio > self.size_threshold:
+                            self.is_stopping = True
+                            self.stop_start_time = now
+                            self.global_stop_event.set() # BẬT CỜ DỪNG XE
+                            
+                            if self.logger:
+                                self.logger.warning(f"TrafficSign: Thấy biển STOP! (Kích thước: {ratio:.3f}). DỪNG 5 GIÂY.")
+                            break # Chỉ cần xử lý 1 biển báo là đủ
+                            
         except Exception as e:
             if self.logger:
-                self.logger.debug("ObstacleWorkerYOLO error: %s", e)
+                self.logger.debug(f"TrafficSignWorker error: {e}")
 
 class LaneWorker(BasePerceptionWorker):
     """
@@ -407,56 +492,56 @@ class LaneWorker(BasePerceptionWorker):
 
 
 
-class HardcodedWorker(BasePerceptionWorker):
-    """
-    Hardcoded sequence for demo/testing.
-    Sequence:
-    - 0-5s: Straight (0 deg), Speed 30 cm/s
-    - 5-6s: Turn 13 deg, Speed 30 cm/s
-    - 6-8s: Turn 15 deg, Speed 30 cm/s
-    - >8s: Stop
-    """
-    def __init__(self, frame_queue, queuesList, logger=None, pause=0.1):
-        super(HardcodedWorker, self).__init__(frame_queue, queuesList, logger, pause)
-        self.steer_sender = messageHandlerSender(queuesList, SteerMotor)
-        self.speed_sender = messageHandlerSender(queuesList, SpeedMotor)
-        self.start_time = None
+# class HardcodedWorker(BasePerceptionWorker):
+#     """
+#     Hardcoded sequence for demo/testing.
+#     Sequence:
+#     - 0-5s: Straight (0 deg), Speed 30 cm/s
+#     - 5-6s: Turn 13 deg, Speed 30 cm/s
+#     - 6-8s: Turn 15 deg, Speed 30 cm/s
+#     - >8s: Stop
+#     """
+#     def __init__(self, frame_queue, queuesList, logger=None, pause=0.1):
+#         super(HardcodedWorker, self).__init__(frame_queue, queuesList, logger, pause)
+#         self.steer_sender = messageHandlerSender(queuesList, SteerMotor)
+#         self.speed_sender = messageHandlerSender(queuesList, SpeedMotor)
+#         self.start_time = None
 
-    def thread_work(self):
-        if self.start_time is None:
-            self.start_time = time.time()
-            if self.logger:
-                self.logger.info("HardcodedWorker started sequence at %f", self.start_time)
+#     def thread_work(self):
+#         if self.start_time is None:
+#             self.start_time = time.time()
+#             if self.logger:
+#                 self.logger.info("HardcodedWorker started sequence at %f", self.start_time)
 
-        elapsed = time.time() - self.start_time
+#         elapsed = time.time() - self.start_time
         
-        target_speed = 0
-        target_steer = 0
+#         target_speed = 0
+#         target_steer = 0
 
-        # Sequence Logic
-        if elapsed < 5.0:
-            # 0-5s: Straight, Speed 30
-            target_speed = 300 # 30 cm/s * 10
-            target_steer = 0
-        elif elapsed < 6.0:
-            # 5-6s: Turn 13 deg
-            target_speed = 300
-            target_steer = 130 # 13 deg * 10
-        elif elapsed < 8.0:
-            # 6-8s: Turn 15 deg
-            target_speed = 300
-            target_steer = 150 # 15 deg * 10
-        else:
-            # >8s: Stop
-            target_speed = 0
-            target_steer = 0
+#         # Sequence Logic
+#         if elapsed < 5.0:
+#             # 0-5s: Straight, Speed 30
+#             target_speed = 300 # 30 cm/s * 10
+#             target_steer = 0
+#         elif elapsed < 6.0:
+#             # 5-6s: Turn 13 deg
+#             target_speed = 300
+#             target_steer = 130 # 13 deg * 10
+#         elif elapsed < 8.0:
+#             # 6-8s: Turn 15 deg
+#             target_speed = 300
+#             target_steer = 150 # 15 deg * 10
+#         else:
+#             # >8s: Stop
+#             target_speed = 0
+#             target_steer = 0
         
-        # Send
-        self.speed_sender.send(str(int(target_speed)))
-        self.steer_sender.send(str(int(target_steer)))
+#         # Send
+#         self.speed_sender.send(str(int(target_speed)))
+#         self.steer_sender.send(str(int(target_steer)))
 
-        if self.logger:
-             self.logger.info("Hardcoded: T=%.1f | Speed=%s Steer=%s", elapsed, target_speed, target_steer)
+#         if self.logger:
+#              self.logger.info("Hardcoded: T=%.1f | Speed=%s Steer=%s", elapsed, target_speed, target_steer)
 
 
 class processPerception(WorkerProcess):
