@@ -25,6 +25,7 @@ from queue import Queue, Full, Empty
 import torch
 import ultralytics
 from scipy.interpolate import CubicSpline
+import traceback
 
 class AdaptiveController:
     """
@@ -332,15 +333,15 @@ class TrafficSignWorker(BasePerceptionWorker):
         
         # --- THÔNG SỐ CONFIG ---
         self.stop_sign_class_id = 11       # ID của biển Stop trong YOLOv8 COCO
-        self.conf_threshold = 0.5          # Độ tự tin tối thiểu (50%)
+        self.conf_threshold = 0.6         # Độ tự tin tối thiểu (60%)
         self.size_threshold = 0.03         # Diện tích biển báo / Diện tích ảnh (Càng lớn xe càng dừng gần biển)
         
         # --- STATE MACHINE ---
         self.is_stopping = False
         self.stop_start_time = 0
-        self.stop_duration = 5.0           # Dừng 5 giây
+        self.stop_duration = 3.0           # Dừng đúng 3 giây
         self.cooldown_until = 0
-        self.cooldown_duration = 4.0       # Sau khi dừng, bỏ qua biển Stop 4 giây để xe đi qua hẳn
+        self.cooldown_duration = 3.0       # Sau khi dừng, bỏ qua biển Stop 3 giây để xe đi qua hẳn
 
     def thread_work(self):
         now = time.time()
@@ -348,15 +349,15 @@ class TrafficSignWorker(BasePerceptionWorker):
         # 1. Kiểm tra trạng thái đang Dừng
         if self.is_stopping:
             if now - self.stop_start_time <= self.stop_duration:
-                # Vẫn đang trong thời gian 5 giây chờ, không làm gì cả
+                # Vẫn đang trong thời gian 3 giây chờ, không làm gì cả
                 return
             else:
-                # Đã hết 5 giây, thả cờ cho xe chạy tiếp và vào trạng thái Cooldown
+                # Đã hết 3 giây, thả cờ cho xe chạy tiếp và vào trạng thái Cooldown
                 self.is_stopping = False
                 self.global_stop_event.clear()
                 self.cooldown_until = now + self.cooldown_duration
                 if self.logger:
-                    self.logger.info("TrafficSign: Đã chờ xong 5s. Tiếp tục chạy!")
+                    self.logger.info("TrafficSign: Đã chờ xong 3s. Tiếp tục chạy!")
                 return
 
         # 2. Kiểm tra trạng thái Cooldown (Vừa dừng xong, đang đi qua biển báo)
@@ -395,7 +396,7 @@ class TrafficSignWorker(BasePerceptionWorker):
                             self.global_stop_event.set() # BẬT CỜ DỪNG XE
                             
                             if self.logger:
-                                self.logger.warning(f"TrafficSign: Thấy biển STOP! (Kích thước: {ratio:.3f}). DỪNG 5 GIÂY.")
+                                self.logger.warning(f"TrafficSign: Thấy biển STOP! (Kích thước: {ratio:.3f}). DỪNG 3 GIÂY.")
                             break # Chỉ cần xử lý 1 biển báo là đủ
                             
         except Exception as e:
@@ -498,6 +499,7 @@ class LaneWorker(BasePerceptionWorker):
         except Exception as e:
             if self.logger:
                 self.logger.info("LaneWorker error: %s", e)
+                self.logger.error(f"LaneWorker CRASHED: {e}", exc_info=True)
     
     def stop(self):
         if hasattr(self, 'csv_file') and self.csv_file:
