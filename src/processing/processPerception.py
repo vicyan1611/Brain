@@ -83,12 +83,12 @@ class AdaptiveController:
 class FrameReader(ThreadWithStop):
     """Reads frames from `serialCamera` messages and pushes decoded frames into a local queue."""
 
-    def __init__(self, queuesList, target_queues, logger=None, pause=0.01, distance_threshold_cm=150.0, log_interval_sec=1.0):
+    def __init__(self, queuesList, frame_queue, target_queues, logger=None, pause=0.01, distance_threshold_cm=150.0, log_interval_sec=1.0):
         super(FrameReader, self).__init__(pause=pause)
         self.sub = messageHandlerSubscriber(queuesList, serialCamera, "lastOnly", True)
         self.distance_sub = messageHandlerSubscriber(queuesList, DistanceReading, "lastOnly", True)
 
-        # self.q = frame_queue
+        self.q = frame_queue
         self.target_queues = target_queues
 
         self.logger = logger
@@ -117,19 +117,60 @@ class FrameReader(ThreadWithStop):
         if msg is None:
             return
 
+Gemini đã nói
+Hoàn toàn được! Ý tưởng này của bạn rất hay nếu bạn muốn giữ lại cấu trúc cũ cho LaneWorker (dùng frame_queue gốc) và mở rộng thêm cho các Worker mới (dùng target_queues).
+
+Chúng ta có thể lập trình để FrameReader phục vụ cả hai cùng một lúc. Vẫn với nguyên tắc "Copy ảnh ra để không bị đụng độ", dưới đây là cách bạn viết lại code để đáp ứng chính xác ý muốn này:
+
+Bước 1: Sửa lại FrameReader
+Bạn sẽ nhận lại biến frame_queue ở hàm __init__. Trong hàm thread_work, bạn sẽ put một bản copy vào self.q (là frame_queue), sau đó chạy vòng lặp for để put các bản copy khác vào target_queues.
+
+Python
+class FrameReader(ThreadWithStop):
+    """Reads frames from `serialCamera` messages and pushes decoded frames into multiple local queues."""
+
+    def __init__(self, queuesList, frame_queue, target_queues, logger=None, pause=0.01, distance_threshold_cm=150.0, log_interval_sec=1.0):
+        super(FrameReader, self).__init__(pause=pause)
+        self.sub = messageHandlerSubscriber(queuesList, serialCamera, "lastOnly", True)
+        self.distance_sub = messageHandlerSubscriber(queuesList, DistanceReading, "lastOnly", False) # Nhớ để False
+
+        # Nhận cả 2 loại Queue
+        self.q = frame_queue              # Queue đơn lẻ (Cho LaneWorker)
+        self.target_queues = target_queues # List các Queue (Cho Obstacle và TrafficSign)
+
+        self.logger = logger
+        self.distance_threshold_cm = distance_threshold_cm
+        self.log_interval_sec = log_interval_sec
+        self._last_distance_cm = None
+        self._last_log_ts = 0.0
+
+    def thread_work(self):
+        # ... (Phần check distance_sub giữ nguyên) ...
+
+        msg = self.sub.receive()
+        if msg is None:
+            return
+
         try:
-            # expect base64-encoded jpeg string
+            # Giải mã ảnh
             data = base64.b64decode(msg)
             arr = np.frombuffer(data, dtype=np.uint8)
             frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
             if frame is None:
                 return
             
+            # 1. Đẩy vào frame_queue gốc (Dùng cho LaneWorker)
+            try:
+                self.q.put_nowait(frame.copy())
+            except Full:
+                pass 
+            
+            # 2. Đẩy vào các target_queues (Dùng cho Obstacle, TrafficSign,...)
             for q in self.target_queues:
                 try:
-                    q.put_nowait(frame)
+                    q.put_nowait(frame.copy())
                 except Full:
-                    pass # drop frame if worker is busy
+                    pass 
                     
         except Exception as e:
             if self.logger:
@@ -473,15 +514,16 @@ class processPerception(WorkerProcess):
 
     def _init_threads(self):
         # Lưu ý: Cần tạo queue riêng cho từng worker để tránh mất frame
-        self.lane_queue = Queue(maxsize=2)
-        self.obstacle_queue = Queue(maxsize=2)
-        self.sign_queue = Queue(maxsize=2)
+        self._frame_queue = Queue(maxsize=4)
+        self.obstacle_queue = Queue(maxsize=4)
+        self.sign_queue = Queue(maxsize=4)
 
         # Frame reader
         self.threads.append(
             FrameReader(
                 self.queuesList,
-                [self.lane_queue, self.obstacle_queue, self.sign_queue], 
+                self._frame_queue,
+                [self.obstacle_queue, self.sign_queue], 
                 self.logging,
                 distance_threshold_cm=self.distance_threshold_cm,
                 log_interval_sec=self.distance_log_interval_sec,
@@ -491,9 +533,9 @@ class processPerception(WorkerProcess):
         # Worker threads (easy to extend)
         self.threads.append(ObstacleWorker(self.obstacle_queue, self.queuesList, self.logging))
 
-        # Khởi tạo LaneWorker 
-        self.threads.append(LaneWorker(self.lane_queue, self.queuesList, self.global_stop_event, self.logging))
-
+        # 3. Khởi tạo LaneWorker dùng Queue gốc
+        self.threads.append(LaneWorker(self._frame_queue, self.queuesList, self.global_stop_event, self.logging))
+        
         # khởi tạo traffic sign worker
         self.threads.append(
             TrafficSignWorker(
