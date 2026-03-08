@@ -25,7 +25,6 @@ from queue import Queue, Full, Empty
 import torch
 import ultralytics
 from scipy.interpolate import CubicSpline
-import traceback
 
 class AdaptiveController:
     """
@@ -134,7 +133,7 @@ class FrameReader(ThreadWithStop):
                     
         except Exception as e:
             if self.logger:
-                self.logger.debug("FrameReader decode error: %s", e)
+                self.logger.info("FrameReader decode error: %s", e)
 
 
 class BasePerceptionWorker(ThreadWithStop):
@@ -251,72 +250,6 @@ class ObstacleWorker(BasePerceptionWorker):
         # except Exception as e:
         #     if self.logger:
         #         self.logger.debug("ObstacleWorker error: %s", e)
-
-# class ObstacleWorkerYOLO(BasePerceptionWorker):
-#     """Detect obstacles using YOLOv8 model."""
-#     def __init__(self, frame_queue, queuesList, logger=None, pause=0.01,
-#                 yolo_model=None, device="cpu", lock=None, score_thr=0.35, save_dir=None):
-        
-#         super(ObstacleWorkerYOLO, self).__init__(frame_queue, queuesList, logger, pause)
-#         self.speed_sender = messageHandlerSender(queuesList, SpeedMotor)
-#         self.warn_sender = messageHandlerSender(queuesList, WarningSignal)
-#         self.brake_sender = messageHandlerSender(self.queuesList, Brake)
-#         self.model = yolo_model
-#         self.device = device
-#         self.lock = lock or threading.Lock()
-#         self.score_thr = score_thr
-#         self.save_dir = save_dir
-#         self._frame_idx = 0
-#         self._last_stop_time = 0
-
-#     def thread_work(self):
-#         try:
-#             frame = self.q.get(timeout=0.5)
-#         except Empty:
-#             return
-
-#         try:
-#             with torch.inference_mode():
-#                 # lock to avoid concurrent model() calls from multiple threads
-#                 with self.lock:
-#                     results = self.model(frame, verbose=False, device=self.device)[0]
-#                     self.logger.debug("ObstacleWorkerYOLO: %d boxes detected", len(results.boxes))
-
-#             for box in results.boxes:
-#                 conf = float(box.conf)
-#                 if conf < self.score_thr:
-#                     continue
-#                 cls_id = int(box.cls)
-#                 xyxy = box.xyxy[0].tolist()
-
-#                 # ----- Handle detected obstacle -----
-#                 if self.save_dir:
-#                     self._frame_idx += 1
-#                     vis = frame.copy()
-#                     x1, y1, x2, y2 = map(int, xyxy)
-#                     cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 0), 2)
-#                     cv2.putText(vis, f"{cls_id}:{conf:.2f}", (x1, y1 - 5),
-#                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-#                     out_path = os.path.join(self.save_dir, f"frame_{self._frame_idx:06d}.jpg")
-#                     cv2.imwrite(out_path, vis)                    
-#                 # ----- Finish handling obstacle -----
-
-#                 # # simple action: stop and warn once per second
-#                 # now = time.time()
-#                 # if now - self._last_stop_time > 1.0:
-#                 #     self._last_stop_time = now
-#                 #     try:
-#                 #         self.speed_sender.send("0")
-#                 #         self.brake_sender.send("0")
-#                 #     except Exception:
-#                 #         pass
-#                 #     try:
-#                 #         self.warn_sender.send(f"yolo:{cls_id}:{conf:.2f}")
-#                 #     except Exception:
-#                 #         pass
-#         except Exception as e:
-#             if self.logger:
-#                 self.logger.debug("ObstacleWorkerYOLO error: %s", e)
 
 class TrafficSignWorker(BasePerceptionWorker):
     """
@@ -524,6 +457,7 @@ class processPerception(WorkerProcess):
         self.model = None
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.global_stop_event = threading.Event() # tạo cờ dừng toàn cục cho hệ thống
+        self._init_model()  # khởi tạo model
 
     def _init_model(self):
         self.model_path = 'models/yolov8n.pt'
@@ -573,22 +507,6 @@ class processPerception(WorkerProcess):
             )
         )
         # self.threads.append(TrafficSignWorker(self.sign_queue, self.queuesList, self.global_stop_event, self.model, self.device, self.model_lock, self.logging))
-
-        # self.threads.append(
-        #     ObstacleWorkerYOLO(
-        #         self._frame_queue,
-        #         self.queuesList,
-        #         self.logging,
-        #         yolo_model=self.model,
-        #         device=self.device,
-        #         lock=self.model_lock,
-        #         score_thr=0.35,
-        #         save_dir=self.save_dir,
-        #     )
-        # )
-        
-        # self.threads.append(LaneWorker(self._frame_queue, self.queuesList, self.logging))
-        # self.threads.append(HardcodedWorker(self._frame_queue, self.queuesList, self.logging))
 
         # Add more workers here as needed
 
