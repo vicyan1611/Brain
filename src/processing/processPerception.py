@@ -403,7 +403,7 @@ class LaneWorker(BasePerceptionWorker):
     Lane detection worker that uses Adaptive Controller.
     Controls BOTH Steer and Speed based on road curvature.
     """
-    def __init__(self, frame_queue, queuesList, logger=None, pause=0.02):
+    def __init__(self, frame_queue, queuesList,global_stop_event, logger=None, pause=0.02):
         super(LaneWorker, self).__init__(frame_queue, queuesList, logger, pause)
         
         # Senders
@@ -417,6 +417,9 @@ class LaneWorker(BasePerceptionWorker):
         # Khởi tạo Logic
         self.estimator = LaneCurveEstimator()
         self.controller = AdaptiveController() 
+
+        # biến dừng toàn cục cho stop traffic sign
+        self.global_stop_event = global_stop_event
 
         self.log_dir = "logs"
         os.makedirs(self.log_dir, exist_ok=True)
@@ -443,6 +446,11 @@ class LaneWorker(BasePerceptionWorker):
             
             # 2. Control: Tính góc lái và tốc độ
             steer_deg, target_speed = self.controller.get_control(offset, heading)
+
+            # 2.5 Kiểm tra cờ traffic sign
+            if self.global_stop_event.is_set():
+                target_speed = 0  # Ép tốc độ về 0 ngay lập tức
+                steer_deg = 0     # Trả lái thẳng (tùy chọn)
             
             # 3. Apply speed factor from ObstacleWorker (default 1.0 = no reduction)
             speed_factor = self.speed_factor_sub.receive()
@@ -457,10 +465,12 @@ class LaneWorker(BasePerceptionWorker):
             steer_scaled = steer_deg * 10
             steer_final = float(np.clip(steer_scaled, -100, 100))
             self.steer_sender.send(int(steer_final))
+            # self.steer_sender.send(str(int(steer_final)))
 
             speed_scaled = target_speed * 10
-            speed_final = float(np.clip(speed_scaled, -500, 500))
+            speed_final = float(np.clip(speed_scaled, -300, 300))
             self.speed_sender.send(int(speed_final))
+            # self.speed_sender.send(str(int(speed_final)))
 
             # Ghi dữ liệu vào CSV
             self.csv_writer.writerow([
@@ -562,6 +572,7 @@ class processPerception(WorkerProcess):
         super(processPerception, self).__init__(self.queuesList, ready_event)
         self.model = None
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.global_stop_event = threading.Event() # tạo cờ dừng toàn cục cho hệ thống
 
     def _init_model(self):
         self.model_path = 'models/yolov8n.pt'
@@ -576,11 +587,17 @@ class processPerception(WorkerProcess):
         self.logging.info("Perception YOLO model loaded on %s", self.device)
 
     def _init_threads(self):
+        # Lưu ý: Cần tạo queue riêng cho từng worker để tránh mất frame
+        self.lane_queue = Queue(maxsize=2)
+        self.obstacle_queue = Queue(maxsize=2)
+        self.sign_queue = Queue(maxsize=2)
+
         # Frame reader
         self.threads.append(
             FrameReader(
                 self.queuesList,
-                self._frame_queue,
+                # self._frame_queue,
+                [self.lane_queue, self.obstacle_queue, self.sign_queue], # Đẩy vào dạng list
                 self.logging,
                 distance_threshold_cm=self.distance_threshold_cm,
                 log_interval_sec=self.distance_log_interval_sec,
@@ -588,7 +605,24 @@ class processPerception(WorkerProcess):
         )
 
         # Worker threads (easy to extend)
-        self.threads.append(ObstacleWorker(self._frame_queue, self.queuesList, self.logging))
+        # self.threads.append(ObstacleWorker(self._frame_queue, self.queuesList, self.logging)) # này của Phúc, đổi qua xài queue
+        self.threads.append(ObstacleWorker(self.obstacle_queue, self.queuesList, self.logging))
+
+        # Khởi tạo LaneWorker 
+        self.threads.append(LaneWorker(self.lane_queue, self.queuesList, self.global_stop_event, self.logging))
+
+        # khởi tạo traffic sign worker
+        self.threads.append(
+            TrafficSignWorker(
+                frame_queue=self.sign_queue,
+                queuesList=self.queuesList,
+                global_stop_event=self.global_stop_event,
+                yolo_model=self.model,
+                device=self.device,
+                lock=self.model_lock,
+                logger=self.logging
+            )
+        )
 
         # self.threads.append(
         #     ObstacleWorkerYOLO(
@@ -604,7 +638,7 @@ class processPerception(WorkerProcess):
         # )
         
         # self.threads.append(LaneWorker(self._frame_queue, self.queuesList, self.logging))
-        self.threads.append(HardcodedWorker(self._frame_queue, self.queuesList, self.logging))
+        # self.threads.append(HardcodedWorker(self._frame_queue, self.queuesList, self.logging))
 
         # Add more workers here as needed
 
